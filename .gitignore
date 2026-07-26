@@ -1,0 +1,39 @@
+# Rust compilation artifacts
+/poc/rust/target/
+
+# Python execution files
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# LaTeX build outputs
+/paper/*.aux
+/paper/*.fdb_latexmk
+/paper/*.fls
+/paper/*.log
+/paper/*.out
+/paper/*.toc
+/paper/*.synctex.gz
+/paper/*.bbl
+/paper/*.blg
+/paper/*.run.xml
+/paper/*-blx.bib
+/paper/*.pdf
+
+# Also ignore root-level pdf and auxiliary files if any remain
+/*.pdf
+/*.aux
+/*.log
+/*.toc
+/*.out
+/*.fdb_latexmk
+/*.fls
+
+# OS-specific files
+.DS_Store
+
+# Virtual environment
+.venv/
+.vscode/
+

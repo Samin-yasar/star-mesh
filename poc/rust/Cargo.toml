@@ -1,0 +1,27 @@
+[package]
+name = "star-mesh-poc"
+version = "0.1.0"
+edition = "2021"
+description = "Proof-of-concept for Star-Mesh hybrid PQ-X3DH + Double Ratchet"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "star-mesh-poc"
+path = "src/main.rs"
+
+[dependencies]
+# FIPS 203 ML-KEM-768 (RustCrypto pure-Rust implementation)
+ml-kem   = { version = "0.3",  features = ["mlkem768"] }
+# RFC 7748 X25519 Diffie-Hellman
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# HKDF-SHA-256 (paper uses SHA-3; interface is identical)
+hkdf  = "0.12"
+sha2  = "0.10"
+# BLAKE3 for symmetric ratchet
+blake3 = "1"
+# Cryptographically-secure randomness
+rand  = "0.8"
+# Zeroize secret material from memory
+zeroize = { version = "1", features = ["derive"] }
+# Constant-time comparison
+subtle = "2"
