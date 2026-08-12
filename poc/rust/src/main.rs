@@ -1,29 +1,51 @@
-use rand::rngs::OsRng;
+use rand_core::Rng;
 use x25519_dalek::{StaticSecret, PublicKey as XPublicKey};
-use ml_kem::{MlKem768, Encapsulate, Decapsulate};
+use ml_kem::{MlKem768, EncapsulationKey, DecapsulationKey, Encapsulate, KeyExport, Seed};
+use ml_kem::kem::Decapsulate;
 use hkdf::Hkdf;
 use sha2::Sha256;
-use zeroize::Zeroize;
 use std::collections::HashMap;
 
 // Typings for convenience matching the paper's specs
 type Key32 = [u8; 32];
 type Key64 = [u8; 64];
 
+/// Generate an X25519 StaticSecret using rand 0.10's ThreadRng.
+/// Fills 32 raw bytes and constructs from them (bridges rand_core 0.6 / 0.10 split).
+fn random_x25519_secret() -> StaticSecret {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    StaticSecret::from(bytes)
+}
+
+/// Generate an ML-KEM-768 key pair via from_seed (FIPS 203 §7.1).
+/// Seed = 64 uniformly-random bytes (d ∥ z). Avoids the `getrandom` feature.
+/// Returns (EncapsulationKey, DecapsulationKey).
+fn mlkem768_keygen() -> (EncapsulationKey<MlKem768>, DecapsulationKey<MlKem768>) {
+    // Fill 64 random bytes — Seed = Array<u8, U64> implements From<[u8; 64]>
+    let mut seed_bytes = [0u8; 64];
+    rand::rng().fill_bytes(&mut seed_bytes);
+    let seed = Seed::from(seed_bytes);
+    let dk = DecapsulationKey::<MlKem768>::from_seed(seed);
+    // encapsulation_key() derives the public key from the private key at zero cost
+    let ek = dk.encapsulation_key().clone();
+    (ek, dk)
+}
+
 pub struct BobPreKeyBundle {
     pub ik_dh_pk: XPublicKey,
     pub spk_pk: XPublicKey,
     pub otpk_pk: XPublicKey,
-    pub pq_spk_pk: ml_kem::PublicKey<MlKem768>,
-    pub pq_otpk_pk: ml_kem::PublicKey<MlKem768>,
+    pub pq_spk_pk: EncapsulationKey<MlKem768>,
+    pub pq_otpk_pk: EncapsulationKey<MlKem768>,
 }
 
 pub struct BobSecretBundle {
     pub ik_dh_sk: StaticSecret,
     pub spk_sk: StaticSecret,
     pub otpk_sk: StaticSecret,
-    pub pq_spk_sk: ml_kem::PrivateKey<MlKem768>,
-    pub pq_otpk_sk: ml_kem::PrivateKey<MlKem768>,
+    pub pq_spk_sk: DecapsulationKey<MlKem768>,
+    pub pq_otpk_sk: DecapsulationKey<MlKem768>,
 }
 
 /// Helper to run HKDF-SHA256 (paper uses SHA3-256; interface is identical)
@@ -62,10 +84,8 @@ pub fn pq_x3dh_initiator(
     bob_ik_dsa_pk: &[u8],
     bob_bundle: &BobPreKeyBundle,
 ) -> (Key64, HandshakeMessageM0) {
-    let mut rng = OsRng;
-
     // Step 1: Classical X3DH Component
-    let alice_eph_sk = StaticSecret::random_from_rng(&mut rng);
+    let alice_eph_sk = random_x25519_secret();
     let alice_eph_pk = XPublicKey::from(&alice_eph_sk);
 
     let dh1 = alice_ik_dh_sk.diffie_hellman(&bob_bundle.spk_pk);
@@ -80,8 +100,9 @@ pub fn pq_x3dh_initiator(
     ss_cl.extend_from_slice(dh4.as_bytes());
 
     // Step 2: Post-Quantum KEM Component
-    let (ct_pq1, ss_pq1) = bob_bundle.pq_spk_pk.encapsulate(&mut rng).expect("Kyber768 Encaps 1 failed");
-    let (ct_pq2, ss_pq2) = bob_bundle.pq_otpk_pk.encapsulate(&mut rng).expect("Kyber768 Encaps 2 failed");
+    // encapsulate_with_rng returns (Ciphertext, SharedKey) — not a Result
+    let (ct_pq1, ss_pq1) = bob_bundle.pq_spk_pk.encapsulate_with_rng(&mut rand::rng());
+    let (ct_pq2, ss_pq2) = bob_bundle.pq_otpk_pk.encapsulate_with_rng(&mut rand::rng());
 
     // Step 3: Cryptographic Binding and Secret Derivation
     let mut ss_hybrid = Vec::new();
@@ -132,8 +153,9 @@ pub fn pq_x3dh_responder(
     ss_cl.extend_from_slice(dh4.as_bytes());
 
     // Step 2: Post-Quantum decapsulations
-    let ss_pq1 = bob_secrets.pq_spk_sk.decapsulate(&m0.ct_pq1).expect("Kyber768 Decaps 1 failed");
-    let ss_pq2 = bob_secrets.pq_otpk_sk.decapsulate(&m0.ct_pq2).expect("Kyber768 Decaps 2 failed");
+    // decapsulate() returns SharedKey directly — ML-KEM uses implicit rejection (FIPS 203 §7.3)
+    let ss_pq1 = bob_secrets.pq_spk_sk.decapsulate(&m0.ct_pq1);
+    let ss_pq2 = bob_secrets.pq_otpk_sk.decapsulate(&m0.ct_pq2);
 
     // Concatenate to reconstruct SS_hybrid
     let mut ss_hybrid = Vec::new();
@@ -160,8 +182,8 @@ pub struct RatchetState {
     pub root_key: Key32,
     pub send_chain_key: Option<Key32>,
     pub recv_chain_key: Option<Key32>,
-    pub pq_sk_local: Option<ml_kem::PrivateKey<MlKem768>>,
-    pub pq_pk_local: Option<ml_kem::PublicKey<MlKem768>>,
+    pub pq_sk_local: Option<DecapsulationKey<MlKem768>>,
+    pub pq_pk_local: Option<EncapsulationKey<MlKem768>>,
     pub pq_step_counter: u32,
     pub skipped_keys: HashMap<(Key32, u32), Key32>,
 }
@@ -218,34 +240,33 @@ impl RatchetState {
     }
 
     /// 3.3.3 PQ Ratchet initialization (Alice side)
-    pub fn pq_ratchet_init(&mut self) -> ml_kem::PublicKey<MlKem768> {
-        let mut rng = OsRng;
-        let (sk, pk) = MlKem768::generate(&mut rng).expect("Kyber768 Keygen failed");
-        self.pq_sk_local = Some(sk);
-        self.pq_pk_local = Some(pk.clone());
+    pub fn pq_ratchet_init(&mut self) -> EncapsulationKey<MlKem768> {
+        let (ek, dk) = mlkem768_keygen();
+        self.pq_sk_local = Some(dk);
+        self.pq_pk_local = Some(ek.clone());
         self.pq_step_counter = 0;
-        pk
+        ek
     }
 
     /// 3.3.3 PQ Ratchet encapsulation (Bob side)
     pub fn pq_ratchet_encapsulate(
         &mut self,
-        remote_pq_pk: &ml_kem::PublicKey<MlKem768>,
+        remote_pq_pk: &EncapsulationKey<MlKem768>,
     ) -> ml_kem::Ciphertext<MlKem768> {
-        let mut rng = OsRng;
-        let (ct, ss_pq) = remote_pq_pk.encapsulate(&mut rng).expect("Kyber768 Encaps failed");
+        // encapsulate_with_rng returns (Ciphertext, SharedKey) — not a Result
+        let (ct, ss_pq) = remote_pq_pk.encapsulate_with_rng(&mut rand::rng());
         self.mix_pq_secret(ss_pq.as_ref());
         ct
     }
 
-    /// 3.3.3 PQ Ratchet decapsulation and zeroization (Alice side)
+    /// 3.3.3 PQ Ratchet decapsulation (Alice side)
+    /// The DecapsulationKey is consumed here — enforces one-time use and secret clearance.
     pub fn pq_ratchet_decapsulate(&mut self, ct: &ml_kem::Ciphertext<MlKem768>) {
-        let mut sk = self.pq_sk_local.take().expect("No pending PQ secret key");
-        let ss_pq = sk.decapsulate(ct).expect("Kyber768 Decaps failed");
+        let sk = self.pq_sk_local.take().expect("No pending PQ secret key");
+        // decapsulate() is infallible in ML-KEM (implicit rejection per FIPS 203 §7.3)
+        let ss_pq = sk.decapsulate(ct);
         self.mix_pq_secret(ss_pq.as_ref());
-
-        // Shred/zeroize the private key
-        sk.zeroize();
+        // sk is dropped here, clearing the decapsulation key from memory
     }
 
     fn mix_pq_secret(&mut self, ss_pq: &[u8]) {
@@ -275,29 +296,28 @@ fn main() {
     println!("║  Corresponds to Sections 3.2 and 3.3 of the paper       ║");
     println!("╚══════════════════════════════════════════════════════════╝");
 
-    let mut rng = OsRng;
-
     hr("Phase 1 — Key Generation");
 
     let alice_ik_dsa_pk = vec![0x42u8; 1952]; // Simulated ML-DSA-65 identity public key (1952 B)
     let bob_ik_dsa_pk   = vec![0x24u8; 1952]; // Simulated ML-DSA-65 identity public key (1952 B)
 
     // Alice long-term Classical keys
-    let alice_ik_dh_sk = StaticSecret::random_from_rng(&mut rng);
+    let alice_ik_dh_sk = random_x25519_secret();
     let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
 
     // Bob long-term Classical and Post-Quantum keys
-    let bob_ik_dh_sk = StaticSecret::random_from_rng(&mut rng);
+    let bob_ik_dh_sk = random_x25519_secret();
     let bob_ik_dh_pk = XPublicKey::from(&bob_ik_dh_sk);
 
-    let bob_spk_sk = StaticSecret::random_from_rng(&mut rng);
+    let bob_spk_sk = random_x25519_secret();
     let bob_spk_pk = XPublicKey::from(&bob_spk_sk);
 
-    let bob_otpk_sk = StaticSecret::random_from_rng(&mut rng);
+    let bob_otpk_sk = random_x25519_secret();
     let bob_otpk_pk = XPublicKey::from(&bob_otpk_sk);
 
-    let (bob_pq_spk_sk, bob_pq_spk_pk) = MlKem768::generate(&mut rng).unwrap();
-    let (bob_pq_otpk_sk, bob_pq_otpk_pk) = MlKem768::generate(&mut rng).unwrap();
+    // generate_key returns (DecapsulationKey, EncapsulationKey)
+    let (bob_pq_spk_pk, bob_pq_spk_sk) = mlkem768_keygen();
+    let (bob_pq_otpk_pk, bob_pq_otpk_sk) = mlkem768_keygen();
 
     let bob_bundle = BobPreKeyBundle {
         ik_dh_pk: bob_ik_dh_pk,
@@ -318,15 +338,20 @@ fn main() {
     println!("  Alice's IK (DSA) pk: {}", hex_str(&alice_ik_dsa_pk));
     println!("  Bob's IK (DSA) pk  : {}", hex_str(&bob_ik_dsa_pk));
     println!("  Bob's IK (DH) pk   : {}", hex_str(bob_bundle.ik_dh_pk.as_bytes()));
-    // For ML-KEM, we can hash the public key bytes for printing
-    let spk_bytes: [u8; 1184] = bob_bundle.pq_spk_pk.clone().into();
-    println!("  Bob's PQ-SPK pk    : {}", hex_str(&spk_bytes));
+    // KeyExport::to_bytes() serializes the EncapsulationKey to its canonical byte form
+    println!("  Bob's PQ-SPK pk    : {}", hex_str(bob_bundle.pq_spk_pk.to_bytes().as_ref()));
 
     hr("Phase 2 — Hybrid PQ-X3DH Handshake");
 
-    let (okm_alice, m0) = pq_x3dh_initiator(&alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle);
+    let (okm_alice, m0) = pq_x3dh_initiator(
+        &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
+    );
     println!("  Alice computes OKM: {}", hex_str(&okm_alice));
-    println!("  Transmitted M0 payload includes IK^DSA_pk,A ({} B) and IK^DH_pk,A ({} B)", m0.alice_ik_dsa_pk.len(), m0.alice_ik_dh_pk.as_bytes().len());
+    println!(
+        "  Transmitted M0 payload includes IK^DSA_pk,A ({} B) and IK^DH_pk,A ({} B)",
+        m0.alice_ik_dsa_pk.len(),
+        m0.alice_ik_dh_pk.as_bytes().len()
+    );
 
     let okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0);
     println!("  Bob   computes OKM: {}", hex_str(&okm_bob));
@@ -358,15 +383,13 @@ fn main() {
     println!("");
 
     let alice_pq_pk = alice_state.pq_ratchet_init();
-    let alice_pq_pk_bytes: [u8; 1184] = alice_pq_pk.into();
-    println!("  Alice generates ephemeral ML-KEM pk: {}", hex_str(&alice_pq_pk_bytes));
+    println!("  Alice generates ephemeral ML-KEM pk: {}", hex_str(alice_pq_pk.to_bytes().as_ref()));
 
     let ct_pq = bob_state.pq_ratchet_encapsulate(&alice_pq_pk);
-    let ct_pq_bytes: [u8; 1088] = ct_pq.clone().into();
-    println!("  Bob encapsulates → ct: {}", hex_str(&ct_pq_bytes));
+    println!("  Bob encapsulates → ct: {}", hex_str(ct_pq.as_ref()));
 
     alice_state.pq_ratchet_decapsulate(&ct_pq);
-    println!("  Alice decapsulates, updates RK, zeroizes pq_sk_local.");
+    println!("  Alice decapsulates, updates RK, drops pq_sk_local.");
     println!("");
 
     assert_eq!(alice_state.root_key, bob_state.root_key, "❌ Root keys diverged");
@@ -379,5 +402,173 @@ fn main() {
     println!("    ✔  HKDF binding with AD:  OKM = HKDF(SS_hybrid, 0^32, AD, 64)");
     println!("    ✔  Symmetric ratchet:     MK = BLAKE3-KDF(CK, 0x01, info)");
     println!("    ✔  PQ ratchet update:     RK,CK = HKDF(SS_PQ, RK, 'StarMesh-PQ-RK', 64)");
-    println!("    ✔  Secret zeroization:    pq_sk_local cleared after decapsulation");
+    println!("    ✔  Secret clearance:      pq_sk_local dropped after decapsulation");
+
+    run_benchmarks();
 }
+
+fn run_benchmarks() {
+    hr("Phase 5 — Execution Latency Micro-benchmarks");
+    println!("  Running 1,000 iterations of core cryptographic operations...");
+
+    // Setup keys
+    let alice_ik_dsa_pk = vec![0x42u8; 1952];
+    let bob_ik_dsa_pk   = vec![0x24u8; 1952];
+    let alice_ik_dh_sk = random_x25519_secret();
+    let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
+    let bob_ik_dh_sk = random_x25519_secret();
+    let bob_ik_dh_pk = XPublicKey::from(&bob_ik_dh_sk);
+    let bob_spk_sk = random_x25519_secret();
+    let bob_spk_pk = XPublicKey::from(&bob_spk_sk);
+    let bob_otpk_sk = random_x25519_secret();
+    let bob_otpk_pk = XPublicKey::from(&bob_otpk_sk);
+    let (bob_pq_spk_pk, bob_pq_spk_sk) = mlkem768_keygen();
+    let (bob_pq_otpk_pk, bob_pq_otpk_sk) = mlkem768_keygen();
+
+    let bob_bundle = BobPreKeyBundle {
+        ik_dh_pk: bob_ik_dh_pk,
+        spk_pk: bob_spk_pk,
+        otpk_pk: bob_otpk_pk,
+        pq_spk_pk: bob_pq_spk_pk,
+        pq_otpk_pk: bob_pq_otpk_pk,
+    };
+    let bob_secrets = BobSecretBundle {
+        ik_dh_sk: bob_ik_dh_sk,
+        spk_sk: bob_spk_sk,
+        otpk_sk: bob_otpk_sk,
+        pq_spk_sk: bob_pq_spk_sk,
+        pq_otpk_sk: bob_pq_otpk_sk,
+    };
+
+    // 1. Handshake Benchmark
+    let start_handshake = std::time::Instant::now();
+    for _ in 0..1000 {
+        let (_okm_alice, m0) = pq_x3dh_initiator(
+            &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
+        );
+        let _okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0);
+    }
+    let duration_handshake = start_handshake.elapsed() / 1000;
+
+    // 2. PQ Ratchet Benchmark
+    let mut alice_state = RatchetState::new(&[0u8; 64], true);
+    let mut bob_state = RatchetState::new(&[0u8; 64], false);
+    bob_state.recv_chain_key = alice_state.send_chain_key;
+
+    let start_ratchet = std::time::Instant::now();
+    for _ in 0..1000 {
+        let alice_pq_pk = alice_state.pq_ratchet_init();
+        let ct_pq = bob_state.pq_ratchet_encapsulate(&alice_pq_pk);
+        alice_state.pq_ratchet_decapsulate(&ct_pq);
+    }
+    let duration_ratchet = start_ratchet.elapsed() / 1000;
+
+    println!("  Average latency results (1,000 iterations):");
+    println!("    ✔  PQ-X3DH Handshake (initiator + responder): {:?}", duration_handshake);
+    println!("    ✔  PQ Ratchet Round-trip (init + encaps + decaps): {:?}", duration_ratchet);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_x25519_key_exchange() {
+        let alice_sk = random_x25519_secret();
+        let alice_pk = XPublicKey::from(&alice_sk);
+
+        let bob_sk = random_x25519_secret();
+        let bob_pk = XPublicKey::from(&bob_sk);
+
+        let dh_alice = alice_sk.diffie_hellman(&bob_pk);
+        let dh_bob = bob_sk.diffie_hellman(&alice_pk);
+
+        assert_eq!(dh_alice.as_bytes(), dh_bob.as_bytes());
+    }
+
+    #[test]
+    fn test_mlkem768_encaps_decaps() {
+        let (ek, dk) = mlkem768_keygen();
+        let mut rng = rand::rng();
+        let (ct, ss_encaps) = ek.encapsulate_with_rng(&mut rng);
+        let ss_decaps = dk.decapsulate(&ct);
+
+        assert_eq!(ss_encaps.as_ref(), ss_decaps.as_ref());
+    }
+
+    #[test]
+    fn test_pq_x3dh_handshake() {
+        let alice_ik_dsa_pk = vec![0x42u8; 1952];
+        let bob_ik_dsa_pk   = vec![0x24u8; 1952];
+
+        let alice_ik_dh_sk = random_x25519_secret();
+        let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
+
+        let bob_ik_dh_sk = random_x25519_secret();
+        let bob_ik_dh_pk = XPublicKey::from(&bob_ik_dh_sk);
+
+        let bob_spk_sk = random_x25519_secret();
+        let bob_spk_pk = XPublicKey::from(&bob_spk_sk);
+
+        let bob_otpk_sk = random_x25519_secret();
+        let bob_otpk_pk = XPublicKey::from(&bob_otpk_sk);
+
+        let (bob_pq_spk_pk, bob_pq_spk_sk) = mlkem768_keygen();
+        let (bob_pq_otpk_pk, bob_pq_otpk_sk) = mlkem768_keygen();
+
+        let bob_bundle = BobPreKeyBundle {
+            ik_dh_pk: bob_ik_dh_pk,
+            spk_pk: bob_spk_pk,
+            otpk_pk: bob_otpk_pk,
+            pq_spk_pk: bob_pq_spk_pk,
+            pq_otpk_pk: bob_pq_otpk_pk,
+        };
+
+        let bob_secrets = BobSecretBundle {
+            ik_dh_sk: bob_ik_dh_sk,
+            spk_sk: bob_spk_sk,
+            otpk_sk: bob_otpk_sk,
+            pq_spk_sk: bob_pq_spk_sk,
+            pq_otpk_sk: bob_pq_otpk_sk,
+        };
+
+        let (okm_alice, m0) = pq_x3dh_initiator(
+            &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
+        );
+
+        let okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0);
+
+        assert_eq!(okm_alice, okm_bob);
+    }
+
+    #[test]
+    fn test_symmetric_ratchet() {
+        let okm = [0u8; 64];
+        let mut alice_state = RatchetState::new(&okm, true);
+        let mut bob_state = RatchetState::new(&okm, false);
+
+        bob_state.recv_chain_key = alice_state.send_chain_key;
+
+        let mk_alice = alice_state.ratchet_encrypt();
+        let mk_bob = bob_state.ratchet_decrypt();
+
+        assert_eq!(mk_alice, mk_bob);
+        assert_eq!(alice_state.pq_step_counter, 1);
+    }
+
+    #[test]
+    fn test_pq_ratchet_convergence() {
+        let mut alice_state = RatchetState::new(&[1u8; 64], true);
+        let mut bob_state = RatchetState::new(&[1u8; 64], false);
+        bob_state.recv_chain_key = alice_state.send_chain_key;
+
+        let alice_pq_pk = alice_state.pq_ratchet_init();
+        let ct_pq = bob_state.pq_ratchet_encapsulate(&alice_pq_pk);
+        alice_state.pq_ratchet_decapsulate(&ct_pq);
+
+        assert_eq!(alice_state.root_key, bob_state.root_key);
+        assert!(alice_state.pq_sk_local.is_none());
+    }
+}
+
+
