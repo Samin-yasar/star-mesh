@@ -1094,12 +1094,12 @@ sending event to a receiving event is at most $\frac{f}{1-f} \cdot \frac{1}{n_{\
 \negl(\lambda)$, where $n_{\mathrm{mix}}$ is the number of honest mix nodes on the path.
 \end{proposition}
 
-\noindent This proposition is a direct restatement of the sender-receiver third-party
-unlinkability result established in Theorem~2 (proved in Appendix~A.2) of the Loopix security
-analysis \cite{loopix}; the specific formula above is derived from that theorem under the
-Poisson-mix model with cover traffic at rate $\lambda_{\mathrm{cover}}$.  We make no new claims
-about mixnet security.  Star-Mesh's contribution is the integration of this overlay with the
-hybrid post-quantum ratchet layer.
+\noindent This proposition is adapted from the quantitative sender-receiver third-party
+unlinkability analysis in Section~4.3 of \cite{loopix} (the Poisson-mix model with
+constant-rate cover traffic at rate $\lambda_{\mathrm{cover}}$); the bound $\frac{f}{1-f}
+\cdot \frac{1}{n_{\mathrm{mix}}}$ follows from that analysis under Assumption~\ref{asm:mixnet}.
+We make no new claims about mixnet security.  Star-Mesh's contribution is the integration of
+this overlay with the hybrid post-quantum ratchet layer.
 
 % ============================================================
 \section{Bandwidth and Performance Analysis}
