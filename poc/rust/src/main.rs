@@ -111,14 +111,26 @@ pub fn pq_x3dh_initiator(
     ss_hybrid.extend_from_slice(ss_pq1.as_ref());
     ss_hybrid.extend_from_slice(ss_pq2.as_ref());
 
-    // AD binds the long-term identities with length prefixes
-    let mut ad = b"StarMesh".to_vec();
-    ad.extend_from_slice(&(alice_ik_dsa_pk.len() as u32).to_be_bytes());
-    ad.extend_from_slice(alice_ik_dsa_pk);
-    ad.extend_from_slice(&(bob_ik_dsa_pk.len() as u32).to_be_bytes());
-    ad.extend_from_slice(bob_ik_dsa_pk);
+    // info binds the identities and the transcript (ephemeral key, ciphertexts)
+    let mut info = b"StarMesh".to_vec();
+    info.extend_from_slice(&(alice_ik_dsa_pk.len() as u32).to_be_bytes());
+    info.extend_from_slice(alice_ik_dsa_pk);
+    info.extend_from_slice(&(bob_ik_dsa_pk.len() as u32).to_be_bytes());
+    info.extend_from_slice(bob_ik_dsa_pk);
 
-    let okm_bytes = hkdf_derive(&ss_hybrid, Some(&[0u8; 32]), &ad, 64);
+    let eph_bytes = alice_eph_pk.as_bytes();
+    info.extend_from_slice(&(eph_bytes.len() as u32).to_be_bytes());
+    info.extend_from_slice(eph_bytes);
+
+    let ct_pq1_bytes: &[u8] = ct_pq1.as_ref();
+    info.extend_from_slice(&(ct_pq1_bytes.len() as u32).to_be_bytes());
+    info.extend_from_slice(ct_pq1_bytes);
+
+    let ct_pq2_bytes: &[u8] = ct_pq2.as_ref();
+    info.extend_from_slice(&(ct_pq2_bytes.len() as u32).to_be_bytes());
+    info.extend_from_slice(ct_pq2_bytes);
+
+    let okm_bytes = hkdf_derive(&ss_hybrid, Some(&[0u8; 32]), &info, 64);
     let mut okm = [0u8; 64];
     okm.copy_from_slice(&okm_bytes);
 
@@ -164,13 +176,25 @@ pub fn pq_x3dh_responder(
     ss_hybrid.extend_from_slice(ss_pq1.as_ref());
     ss_hybrid.extend_from_slice(ss_pq2.as_ref());
 
-    let mut ad = b"StarMesh".to_vec();
-    ad.extend_from_slice(&(m0.alice_ik_dsa_pk.len() as u32).to_be_bytes());
-    ad.extend_from_slice(&m0.alice_ik_dsa_pk);
-    ad.extend_from_slice(&(bob_ik_dsa_pk.len() as u32).to_be_bytes());
-    ad.extend_from_slice(bob_ik_dsa_pk);
+    let mut info = b"StarMesh".to_vec();
+    info.extend_from_slice(&(m0.alice_ik_dsa_pk.len() as u32).to_be_bytes());
+    info.extend_from_slice(&m0.alice_ik_dsa_pk);
+    info.extend_from_slice(&(bob_ik_dsa_pk.len() as u32).to_be_bytes());
+    info.extend_from_slice(bob_ik_dsa_pk);
 
-    let okm_bytes = hkdf_derive(&ss_hybrid, Some(&[0u8; 32]), &ad, 64);
+    let eph_bytes = m0.alice_eph_pk.as_bytes();
+    info.extend_from_slice(&(eph_bytes.len() as u32).to_be_bytes());
+    info.extend_from_slice(eph_bytes);
+
+    let ct_pq1_bytes: &[u8] = m0.ct_pq1.as_ref();
+    info.extend_from_slice(&(ct_pq1_bytes.len() as u32).to_be_bytes());
+    info.extend_from_slice(ct_pq1_bytes);
+
+    let ct_pq2_bytes: &[u8] = m0.ct_pq2.as_ref();
+    info.extend_from_slice(&(ct_pq2_bytes.len() as u32).to_be_bytes());
+    info.extend_from_slice(ct_pq2_bytes);
+
+    let okm_bytes = hkdf_derive(&ss_hybrid, Some(&[0u8; 32]), &info, 64);
     let mut okm = [0u8; 64];
     okm.copy_from_slice(&okm_bytes);
 
@@ -399,7 +423,7 @@ fn main() {
     hr("Summary");
     println!("  Demonstrated constructions:");
     println!("    ✔  Hybrid SS derivation:  SS_hybrid = 0xFF||SS_cl||SS_PQ1||SS_PQ2");
-    println!("    ✔  HKDF binding with AD:  OKM = HKDF(SS_hybrid, 0^32, AD, 64)");
+    println!("    ✔  HKDF binding with transcript: OKM = HKDF(SS_hybrid, 0^32, info, 64)");
     println!("    ✔  Symmetric ratchet:     MK = BLAKE3-KDF(CK, 0x01, info)");
     println!("    ✔  PQ ratchet update:     RK,CK = HKDF(SS_PQ, RK, 'StarMesh-PQ-RK', 64)");
     println!("    ✔  Secret clearance:      pq_sk_local dropped after decapsulation");

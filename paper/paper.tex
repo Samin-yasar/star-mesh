@@ -201,15 +201,7 @@ Formally, the hybrid shared secret is computed as
 \[
   SS_{\text{hybrid}} = \texttt{0xFF} \;\|\; SS_{cl} \;\|\; SS_{PQ1} \;\|\; SS_{PQ2}
 \]
-passed through HKDF-SHA3-256, which we model as a pseudorandom function (PRF).  Under this
-model, following the analysis of Giacon et al.\ \cite{giacon2018kem}, the concatenation
-combiner ensures that $SS_{\text{hybrid}}$ is pseudorandom if either $SS_{cl}$ or the
-combination of $SS_{PQ1}$ and $SS_{PQ2}$ remains secure under the stated assumptions; more
-precisely, the combiner's IND-CCA2 advantage is bounded by the sum of the component
-advantages.  HKDF is modeled as a PRF in all proof sketches (see Assumption~\ref{asm:hkdf} in
-Section~\ref{sec:secmodel}).  Our security claims rely specifically on the concatenation-combiner
-setting analyzed in \cite{giacon2018kem} and do not necessarily generalize to arbitrary hybrid
-compositions.
+passed through HKDF-SHA3-256 with the ciphertexts $ct_1, ct_2$ and the classical ephemeral public key $EK_{pk,A}$ bound into the KDF input string $info$. Under this model, following the analysis of Giacon et al.\ \cite{giacon2018kem}, the concatenation combiner ensures that the derived key is pseudorandom and IND-CCA2 secure if either $SS_{cl}$ or the combination of $SS_{PQ1}$ and $SS_{PQ2}$ remains secure under the stated assumptions; binding the transcript (ephemeral key and ciphertexts) satisfies the theorem's precondition, defending against related-ciphertext/re-encapsulation attacks. HKDF is modeled as a PRF in all proof sketches (see Assumption~\ref{asm:hkdf} in Section~\ref{sec:secmodel}). Our security claims rely specifically on the concatenation-combiner setting analyzed in \cite{giacon2018kem}.
 
 \paragraph{Trust Assumptions on Infrastructure.}
 Star-Mesh is \emph{decentralized in deployment}, not trust-free.  The DHT nodes collectively
@@ -226,7 +218,8 @@ Section~\ref{sec:assumptions}.
         $PQ\_OTPK$ usage.
   \item \textbf{Authenticated pre-key design:} A hybrid PQ-X3DH bundle format with signed
         batch hashing of all OTPK and PQ-OTPK material, closing the key-substitution and
-        identity-misbinding vectors highlighted in the literature \cite{blake1997unknown}.
+        identity-misbinding vectors from the general UKS attack class highlighted in the
+        literature \cite{blake1997unknown}.
   \item \textbf{Protocol design:} A fully specified hybrid PQ-X3DH handshake and PQ Double
         Ratchet for asynchronous P2P messaging over a Kademlia DHT, integrating the classical
         X25519 and ML-KEM components in a single decentralized architecture.  This design
@@ -296,8 +289,9 @@ variable-length fields are concatenated.
 For key derivation, $\HKDF(ikm, salt, info, \ell)$ denotes HKDF-SHA3-256 with input key
 material $ikm$, optional $salt$, context $info$, and output length $\ell$ bytes.  SHA3-256 is
 the underlying hash function; it is \emph{not} modeled as a random oracle in this work; rather
-HKDF is modeled as a two-stage PRF (extract then expand) following Krawczyk \cite{rfc5869} and
-Krawczyk's 2010 analysis \cite{krawczyk2010hkdf} (see Assumption~\ref{asm:hkdf} in
+HKDF is modeled as a two-stage extract-then-expand PRF following the HKDF construction in
+RFC~5869 \cite{rfc5869} and its formal analysis by Krawczyk (CRYPTO 2010)
+\cite{krawczyk2010hkdf} (see Assumption~\ref{asm:hkdf} in
 Section~\ref{sec:secmodel}).
 
 \subsection{Key Encapsulation Mechanisms}
@@ -498,10 +492,15 @@ Alice encapsulates against Bob's ML-KEM pre-keys:
 
 \paragraph{Step 3 --- Cryptographic Binding and Key Derivation.}
 The Associated Data binds the handshake to both parties' post-quantum signing identities,
-preventing identity misbinding and Unknown Key-Share (UKS) attacks \cite{blake1997unknown}:
+preventing identity misbinding and Unknown Key-Share (UKS)-class attacks (originally
+demonstrated for STS) \cite{blake1997unknown}:
 \[
   AD = \texttt{``StarMesh''} \| \flen{IK^{DSA}_{pk,A}} \| IK^{DSA}_{pk,A}
                            \| \flen{IK^{DSA}_{pk,B}} \| IK^{DSA}_{pk,B}
+\]
+To satisfy the IND-CCA2 security precondition of the concatenation/split-key combiner proved by Giacon et al.~\cite{giacon2018kem}, the KEM ciphertexts and the classical ephemeral public key are bound into the HKDF input. The binder string $info$ is constructed by appending the length-prefixed transcript parameters to $AD$:
+\[
+  info = AD \| \flen{EK_{pk,A}} \| EK_{pk,A} \| \flen{ct_1} \| ct_1 \| \flen{ct_2} \| ct_2
 \]
 The hybrid input key material is formed by combining classical and post-quantum secrets with a
 domain-separation prefix byte $\texttt{0xFF}$ (following \cite{bindel2018hybrid}):
@@ -511,7 +510,7 @@ domain-separation prefix byte $\texttt{0xFF}$ (following \cite{bindel2018hybrid}
 The 64-byte Output Keying Material is then:
 \[
   OKM = \HKDF\!\left(ikm = SS_{\text{hybrid}},\; salt = \mathbf{0}^{32},\;
-                     info = AD,\; \ell = 64\right)
+                     info = info,\; \ell = 64\right)
 \]
 \textbf{Rationale for $salt = \mathbf{0}^{32}$ at initialization.}  RFC~5869
 \cite{rfc5869} states that when no truly independent salt is available (as is the case at the
@@ -725,7 +724,10 @@ all QPT adversaries.  Under this assumption, ML-KEM-768 is IND-CCA2 secure.
 HKDF-SHA3-256 is modeled as a pseudorandom function (PRF) in the standard model, following the
 two-stage (extract-then-expand) analysis of Krawczyk \cite{krawczyk2010hkdf}.  All proof sketches
 invoking the pseudorandomness of derived keys rely on this assumption.  We do \emph{not} model
-SHA3-256 as a random oracle; the PRF modeling is sufficient for our reductions.
+SHA3-256 as a random oracle; the PRF modeling is sufficient for our reductions.  In particular,
+for this work we model the full interface $\HKDF(ikm, salt, info, \ell)$ as PRF-secure under the
+instantiated salt choices used by the protocol (including $salt = \mathbf{0}^{32}$ at
+initialization and $salt = RK$ in ratchet updates).
 \end{assumption}
 
 \begin{assumption}[DHT Availability and Sybil Resistance]
@@ -752,16 +754,21 @@ specified.  This is an operational assumption.
 \label{asm:rng}
 The node's random number generator is not compromised by the adversary for any sampling event
 after time $t_{rec}$.  This models a recovered operating environment (clean OS RNG,
-side-channel-free execution) following a prior compromise event.  A formal treatment of RNG
-compromise in the context of cryptographic protocols can be found in
-Dodis et al.\ \cite{dodis2013entropic}.  If the RNG is compromised during the PQ ratchet
+side-channel-free execution) following a prior compromise event.  Foundational theory for
+extracting usable randomness from imperfect, seed-dependent sources is given by
+Dodis et al.\ \cite{dodis2013entropic}; our $\mathcal{O}_{\mathsf{RevealRNG}}$/recovery-time
+abstraction is an explicit operational modelling assumption of this work.  If the RNG is
+compromised during the PQ ratchet
 key generation after $t_{rec}$, PCS is information-theoretically unachievable.
 \end{assumption}
 
 \subsection{Execution Environment and Adversary}
 
 We model execution using a multi-party protocol execution game adapted from
-\cite{cohngordon2016,dowling2020ratchet}.  Let $\mathcal{P} = \{P_1, \ldots, P_n\}$ be a set
+\cite{cohngordon2016,dowling2020ratchet}.  Oracle naming in this paper is normalized to a
+single notation ($\calO^{Reveal}$, $\calO^{RevealLTK}$, etc.); it is intended to be
+semantically aligned with their state-reveal and long-term-key compromise queries rather than a
+verbatim reproduction of prior oracle labels.  Let $\mathcal{P} = \{P_1, \ldots, P_n\}$ be a set
 of parties.  Each party $P_i$ may hold multiple sessions; we denote by $\pi^s_i$ the $s$-th
 session of party $P_i$.
 
@@ -988,10 +995,12 @@ $\epsilon' \geq \epsilon/2 - \negl(\lambda)$.
 
 \begin{remark}[Role of the Classical Component]
 Following the analysis of Giacon et al.\ \cite{giacon2018kem} (concatenation combiner with PRF
-combiner, instantiated with HKDF as the PRF per Assumption~\ref{asm:hkdf}), if X25519 remains
+KDF, instantiated with HKDF per Assumption~\ref{asm:hkdf} where the ciphertexts and ephemeral keys are bound to the KDF input), if X25519 remains
 computationally secure (no CRQC), then $SS_{cl}$ alone is expected to make $SS_{\text{hybrid}}$
-pseudorandom under the stated assumptions, providing standard (classical) forward secrecy.  The
-ML-KEM component provides additional PQ-FS against a CRQC.  The two components are
+pseudorandom under the stated assumptions, providing standard (classical) forward secrecy.
+Binding the ciphertexts $ct_1, ct_2$ into $info$ satisfies the precondition of \cite{giacon2018kem},
+guarding against related-ciphertext/re-encapsulation attacks.
+The ML-KEM component provides additional PQ-FS against a CRQC.  The two components are
 \emph{complementary}: security is argued to hold if either is secure under the modeled
 assumptions.
 \end{remark}
@@ -1094,12 +1103,15 @@ sending event to a receiving event is at most $\frac{f}{1-f} \cdot \frac{1}{n_{\
 \negl(\lambda)$, where $n_{\mathrm{mix}}$ is the number of honest mix nodes on the path.
 \end{proposition}
 
-\noindent This proposition is adapted from the quantitative sender-receiver third-party
-unlinkability analysis in Section~4.3 of \cite{loopix} (the Poisson-mix model with
-constant-rate cover traffic at rate $\lambda_{\mathrm{cover}}$); the bound $\frac{f}{1-f}
-\cdot \frac{1}{n_{\mathrm{mix}}}$ follows from that analysis under Assumption~\ref{asm:mixnet}.
-We make no new claims about mixnet security.  Star-Mesh's contribution is the integration of
-this overlay with the hybrid post-quantum ratchet layer.
+\noindent The bound above is a \emph{derived approximation used in this work}, in the style of
+the corruption-fraction threat model underlying Loopix \cite{loopix}.  We do not claim that
+Section~4.3 of \cite{loopix} states this closed-form expression; that section reports
+empirical end-to-end anonymity evaluation under Poisson mixing and constant-rate cover traffic.
+Our use of $\frac{f}{1-f} \cdot \frac{1}{n_{\mathrm{mix}}}$ is therefore an explicit
+modelling assumption under Assumption~\ref{asm:mixnet}, included to parameterise system-level
+risk in Star-Mesh.  We make no new claims about mixnet security beyond this approximation.
+Star-Mesh's contribution is the integration of this overlay with the hybrid post-quantum
+ratchet layer.
 
 % ============================================================
 \section{Bandwidth and Performance Analysis}
@@ -1269,8 +1281,9 @@ designed to provide.
 \paragraph{Double Ratchet Formal Analysis.}
 Cohn-Gordon et al.\ \cite{cohngordon2016} provided the first formal security analysis of the
 Signal Double Ratchet.  Cremers and Zhao\ \cite{dowling2020ratchet} extended this to a more
-fine-grained model.  Our security model and argument structure build directly on these works,
-extending them to the hybrid post-quantum setting with ML-KEM.
+fine-grained model.  Our security model and argument structure are closely adapted from these
+works, with aligned freshness/oracle semantics but protocol-specific reformulation for the
+hybrid post-quantum setting with ML-KEM.
 The technical obstacle these analyses leave open is the adaptation of ratchet freshness
 semantics to KEM-based key exchange: classical DH-ratchet models assume commutativity and
 ephemerality properties that do not hold for KEMs, where the encapsulator and decapsulator
@@ -1291,9 +1304,9 @@ mechanism, a problem that does not arise in Star-Mesh's pairwise ratchet setting
 
 \paragraph{Hybrid KEM Composition.}
 Giacon et al.\ \cite{giacon2018kem} proved that the concatenation combiner for KEMs
-achieves IND-CCA2 security if either component KEM is IND-CCA2 secure, provided the combiner
+achieves IND-CCA2 security if either component KEM is IND-CCA2 secure, provided the KEM ciphertexts are bound into the KDF input and the combiner
 uses a suitable KDF modeled as a PRF (as established in \cite{giacon2018kem}).  Our
-hybrid KEM construction applies the composition results of \cite{giacon2018kem} with HKDF as
+hybrid KEM construction satisfies this precondition by binding the ciphertexts $ct_1, ct_2$ and the ephemeral public key $EK_{pk,A}$ into the HKDF $info$ parameter, applying the composition results of \cite{giacon2018kem} with HKDF as
 the PRF (Assumption~\ref{asm:hkdf}).
 However, these static composition results do not extend to the stateful ratcheting setting:
 they bound the advantage of a single IND-CCA2 distinguisher against a one-shot encapsulation,

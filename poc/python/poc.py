@@ -93,7 +93,12 @@ def pq_x3dh_initiator(alice_ik_dsa_pk: bytes, alice_ik_dh_sk: bytes, alice_ik_dh
           + struct.pack(">I", len(alice_ik_dsa_pk)) + alice_ik_dsa_pk
           + struct.pack(">I", len(bob_ik_dsa_pk))   + bob_ik_dsa_pk)
 
-    OKM = hkdf(ikm=SS_hybrid, salt=b'\x00' * 32, info=AD, length=64)
+    info = (AD
+            + struct.pack(">I", len(eph_pk)) + eph_pk
+            + struct.pack(">I", len(ct_spk)) + ct_spk
+            + struct.pack(">I", len(ct_otpk)) + ct_otpk)
+
+    OKM = hkdf(ikm=SS_hybrid, salt=b'\x00' * 32, info=info, length=64)
 
     m0_payload = {
         "alice_ik_dsa_pk": alice_ik_dsa_pk,
@@ -127,7 +132,12 @@ def pq_x3dh_responder(bob_ik_dsa_pk: bytes, bob_sk_bundle: dict, m0: dict) -> by
           + struct.pack(">I", len(alice_ik_dsa_pk)) + alice_ik_dsa_pk
           + struct.pack(">I", len(bob_ik_dsa_pk))   + bob_ik_dsa_pk)
 
-    OKM = hkdf(ikm=SS_hybrid, salt=b'\x00' * 32, info=AD, length=64)
+    info = (AD
+            + struct.pack(">I", len(eph_pk)) + eph_pk
+            + struct.pack(">I", len(ct_spk)) + ct_spk
+            + struct.pack(">I", len(ct_otpk)) + ct_otpk)
+
+    OKM = hkdf(ikm=SS_hybrid, salt=b'\x00' * 32, info=info, length=64)
     return OKM
 
 class RatchetState:
@@ -286,7 +296,7 @@ def main():
     hr("Summary")
     print("  Demonstrated constructions:")
     print("    ✔  Hybrid SS derivation:  SS_hybrid = 0xFF||SS_cl||SS_PQ1||SS_PQ2")
-    print("    ✔  HKDF binding with AD:  OKM = HKDF(SS_hybrid, 0^32, AD, 64)")
+    print("    ✔  HKDF binding with transcript: OKM = HKDF(SS_hybrid, 0^32, info, 64)")
     print("    ✔  Symmetric ratchet:     MK = BLAKE3-KDF(CK, 0x01, info)")
     print("    ✔  PQ ratchet update:     RK,CK = HKDF(SS_PQ, RK, 'StarMesh-PQ-RK', 64)")
     print("    ✔  Secret zeroization:    pq_sk_local cleared after decapsulation")

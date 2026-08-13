@@ -52,10 +52,11 @@ To establish an initial Shared Secret ($SS$) with Bob ($B$), Alice ($A$) perform
     $$ (ct_2, SS_{PQ2}) \leftarrow \text{ML-KEM-768.Encapsulate}(PQ\_OTPK_{pk}^B) $$
 
 3.  **Cryptographic Binding and Secret Derivation:**
-    The secrets are concatenated and bound to the post-quantum identities of both communicating parties to prevent Unknown Key-Share (UKS) and Identity Misbinding attacks.
+    To prevent Unknown Key-Share (UKS) and Identity Misbinding attacks, the secrets are concatenated and bound to the post-quantum identities. Furthermore, to satisfy the IND-CCA2 security precondition of the Giacon et al. (PKC 2018) KEM combiner, the ciphertexts and the classical ephemeral key are explicitly bound into the HKDF input via the `info` parameter:
     $$ AD = \text{"StarMesh"} \parallel |IK_{pk}^A| \parallel IK_{pk}^A \parallel |IK_{pk}^B| \parallel IK_{pk}^B $$
+    $$ info = AD \parallel |EPH_{pk}^A| \parallel EPH_{pk}^A \parallel |ct_1| \parallel ct_1 \parallel |ct_2| \parallel ct_2 $$
     $$ SS_{hybrid} = SS_{classical} \parallel SS_{PQ1} \parallel SS_{PQ2} $$
-    $$ OKM = \text{HKDF-SHA3-256}(SS_{hybrid}, AD, 64) $$
+    $$ OKM = \text{HKDF-SHA3-256}(SS_{hybrid}, info, 64) $$
 
     The $OKM$ initializes the Double Ratchet root chain. Bob immediately deletes the private key corresponding to $PQ\_OTPK_{pk}^B$ upon successful decapsulation, cementing PQ-FS.
 
