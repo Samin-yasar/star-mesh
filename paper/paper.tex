@@ -106,7 +106,7 @@
 \author{Samin Yasar~\orcidlink{0009-0004-5292-523X}}
 \affil{Independent Researcher \\ Dhaka, Bangladesh \\
        \texttt{research@samin-yasar.dev}}
-\date{July 27, 2026}
+\date{August 13, 2026}
 
 \begin{document}
 
@@ -125,17 +125,27 @@ Distributed Hash Table (DHT) for key distribution and leverages a mixnet-based o
 overlay for metadata obfuscation.
 
 We make the following contributions.  While Star-Mesh builds upon established components such
-as X3DH, the Double Ratchet, Kademlia routing, and Loopix-style mixnets, the primary contribution
-lies in their integration into a decentralized hybrid post-quantum messaging architecture
-together with a unified game-based treatment of post-quantum forward secrecy, PCS recovery,
-and RNG-compromise freshness.
+as X3DH, the Double Ratchet, Kademlia routing, and Loopix-style mixnets, the integration is
+non-trivial: the large size of post-quantum keys and signatures directly conflicts with the
+strict constant-packet-size discipline of Loopix/Sphinx mixnets (which pad all packets to a
+fixed MTU to prevent traffic analysis), meaning that simply layering PQ-KEM epochs onto such a
+network forces packet fragmentation and degrades anonymity.  Star-Mesh resolves this tension
+through a systematic NIST Category~3 parameter selection that maximizes post-quantum security
+margins without exceeding standard mixnet packetization thresholds (see Section~\ref{sec:paramselection}).
+The further substantive contribution is a formal treatment of freshness and recovery semantics
+in a decentralized hybrid post-quantum messaging setting: we unify the analysis of RNG-compromise
+freshness, post-compromise recovery, and the distinction between session-level and one-time
+pre-key PQ-FS.  This is the point at which the protocol is differentiated from prior hybrid
+designs, and it directly addresses the primary concern that a hybrid or semi-static pre-key
+design can weaken forward secrecy semantics.
 (1)~We design a \emph{hybrid} key-exchange mechanism combining classical X25519
 Diffie--Hellman with ML-KEM-768~\cite{nist_fips203} under a concatenation combiner bound by
 HKDF, using one-time post-quantum pre-keys to guarantee initial forward secrecy against a
 quantum-capable adversary.
 (2)~We provide a formal specification of a hybrid post-quantum Double Ratchet state machine
 incorporating ephemeral ML-KEM exchanges, and give game-based security definitions for
-Hybrid Post-Quantum Forward Secrecy (PQ-FS) and Post-Compromise Security (PCS).
+Hybrid Post-Quantum Forward Secrecy (PQ-FS) and Post-Compromise Security (PCS) that explicitly
+integrate RNG compromise into the freshness condition.
 (3)~We sketch game-based security arguments: PQ-FS is argued to follow from the IND-CCA2
 security of ML-KEM-768, PCS restoration is argued after one complete ratchet round-trip (with
 explicit caveats on out-of-order delivery and the skipped-key cache), and authentication
@@ -210,18 +220,26 @@ Section~\ref{sec:assumptions}.
 
 \paragraph{Contributions.}
 \begin{enumerate}
+  \item \textbf{Formal freshness model:} A unified, RNG-integrated game-based treatment of
+        post-quantum forward secrecy and post-compromise recovery, explicitly capturing the
+        distinction between session-level and one-time pre-key PQ-FS under mixed $PQ\_SPK$ and
+        $PQ\_OTPK$ usage.
+  \item \textbf{Authenticated pre-key design:} A hybrid PQ-X3DH bundle format with signed
+        batch hashing of all OTPK and PQ-OTPK material, closing the key-substitution and
+        identity-misbinding vectors highlighted in the literature \cite{blake1997unknown}.
   \item \textbf{Protocol design:} A fully specified hybrid PQ-X3DH handshake and PQ Double
-        Ratchet for asynchronous P2P messaging over a Kademlia DHT, with authenticated
-        one-time pre-key bundles (including hash-binding of all OTPK batches in the signed
-        payload, closing key substitution and identity misbinding attacks \cite{blake1997unknown}).
-  \item \textbf{Formal security model:} Game-based definitions for PQ-FS and PCS adapted from
-        \cite{cohngordon2016,dowling2020ratchet} to the hybrid post-quantum setting, with an
-        explicit RevealRNG oracle integrated into the freshness definition.
+        Ratchet for asynchronous P2P messaging over a Kademlia DHT, integrating the classical
+        X25519 and ML-KEM components in a single decentralized architecture.  This design
+        resolves the non-trivial conflict between post-quantum payload sizes and the strict
+        constant-packet-size requirement of Loopix/Sphinx mixnets through an explicit
+        Category~3 parameter analysis (Section~\ref{sec:paramselection}).
   \item \textbf{Security analysis:} Game-based security arguments for PQ-FS and PCS against
         IND-CCA2 of ML-KEM-768, and for authentication against EUF-CMA of ML-DSA-65.  All
         hybrid arguments are spelled out with named intermediate games.
-  \item \textbf{Metadata resistance:} Analysis of the mixnet overlay achieving
-        sender-receiver unlinkability under standard mixnet assumptions \cite{loopix}.
+  \item \textbf{Metadata resistance under PQC overhead:} Analysis of the mixnet overlay
+        achieving sender-receiver unlinkability under standard mixnet assumptions \cite{loopix},
+        with an explicit argument that Category~3 parameter sizes preserve the constant-packet-size
+        invariant on which Loopix's anonymity guarantees depend.
   \item \textbf{Performance analysis:} Concrete bandwidth cost accounting with an explicit
         $\delta_{\text{DHT}}$ term bounding DHT routing overhead.
   \item \textbf{Prototype implementations:} Tested Python and Rust proof-of-concept
@@ -230,21 +248,24 @@ Section~\ref{sec:assumptions}.
 \end{enumerate}
 
 \paragraph{Scope and Proof Status.}
-This work is intended as a research-oriented protocol design and security-analysis preprint.
-The game-based arguments in Sections~\ref{sec:security} should be interpreted as structured
-proof sketches rather than fully mechanized or reduction-tight proofs in a composable framework.
-In particular, we do not claim a complete UC-style treatment of the protocol \cite{uc_framework},
-nor a full machine-verified analysis of the ratchet state machine.  Our goal is to provide a
-precise cryptographic design together with explicit assumptions, adversarial capabilities, and
-security-reduction intuition sufficient to support further peer review, implementation,
-and formalization work.
+This work is intended as a research-oriented protocol design and security-analysis preprint
+for public dissemination on a preprint server.  The game-based arguments in
+Sections~\ref{sec:security} should be interpreted as structured proof sketches rather than
+fully mechanized or reduction-tight proofs in a composable framework.  In particular, we do
+not claim a complete UC-style treatment of the protocol \cite{uc_framework}, nor a full
+machine-verified analysis of the ratchet state machine.  Our goal is to provide a precise
+cryptographic design together with explicit assumptions, adversarial capabilities, and
+security-reduction intuition sufficient to support further peer review, implementation, and
+formalization work.
 
 \paragraph{Research Positioning.}
 Star-Mesh should be viewed as a protocol-design and analysis contribution rather than a
 production-ready messaging system.  The present manuscript focuses on architectural synthesis,
-adversarial modeling, and hybrid post-quantum ratcheting semantics.  A production deployment
-would additionally require extensive implementation hardening, empirical evaluation,
-interoperability testing, formal verification, and operational abuse-resistance analysis.
+adversarial modeling, and hybrid post-quantum ratcheting semantics in a preprint setting,
+where the goal is to surface a precise design and a clear security model for peer review.
+A production deployment would additionally require extensive implementation hardening,
+empirical evaluation, interoperability testing, formal verification, and operational
+abuse-resistance analysis.
 
 \paragraph{Paper Organization.}
 Section~\ref{sec:prelim} introduces notation and primitives.
@@ -557,7 +578,13 @@ To encrypt message $i$ in the current sending chain:
   N_s &\leftarrow N_s + 1
 \end{align*}
 The message is encrypted as
-$c = \mathsf{AES\text{-}256\text{-}GCM}_{MK_i}(m;\; \mathsf{nonce} = N_s \| \texttt{0}^{76})$.
+$c = \mathsf{AES\text{-}256\text{-}GCM}_{MK_i}(m;\; \mathsf{nonce} = N_s^{32} \| \texttt{0}^{64})$,
+where $N_s^{32}$ is the 4-byte big-endian encoding of the 32-bit send counter $N_s$, and
+$\texttt{0}^{64}$ is 8 zero bytes, together forming a 12-byte (96-bit) nonce as required by
+AES-256-GCM.  The 32-bit counter field is byte-aligned and caps a single chain at
+$2^{32}-1 \approx 4.3 \times 10^9$ messages before nonce reuse; in practice, chains are
+replaced by DH ratchet steps and PQ ratchet steps well before this bound, but the limit
+is stated here as a deliberate design choice rather than an implementation artifact.
 $MK_i$ is zeroized immediately after use. We instantiate the symmetric ratchet using BLAKE3-KDF rather than HKDF-SHA256 due to the high frequency of symmetric updates (triggered per message). BLAKE3's tree-hashing structure yields significantly lower latency and power consumption on resource-constrained devices, while natively supporting secure domain separation.
 
 \subsubsection{DH Ratchet Step}
@@ -941,7 +968,11 @@ by Assumption~\ref{asm:hkdf}.
 ML-KEM pre-keys ($PQ\_SPK$ or $PQ\_OTPK$) will be the one encapsulated by Alice.  $\calB$
 guesses the target key by embedding $pk^*$ as $PQ\_OTPK_{pk,B}$; this guess is correct with
 probability at least $1/2$ (when both $PQ\_SPK$ and $PQ\_OTPK$ are available, $\calB$ guesses
-which encapsulation $\calA_{\mathrm{quant}}$ relies on).  This introduces the factor of $1/2$:
+which encapsulation $\calA_{\mathrm{quant}}$ relies on).  The $1/2$ loss is the standard
+single-target guessing penalty for a reduction that must select one pre-key branch among
+multiple valid candidates; it is a technique limitation of the proof, not an apparent protocol
+weakness.  A multi-instance or hybrid reduction that simultaneously handles the full set of
+candidate ML-KEM pre-keys removes this loss and yields the tight bound up to negligible terms:
 \[
   \Adv^{\mathrm{ind\text{-}cca2}}_{\MLKEM}(\calB)
     \;\geq\; \frac{1}{2}\bigl(\epsilon - \negl(\lambda)\bigr)
@@ -1063,9 +1094,12 @@ sending event to a receiving event is at most $\frac{f}{1-f} \cdot \frac{1}{n_{\
 \negl(\lambda)$, where $n_{\mathrm{mix}}$ is the number of honest mix nodes on the path.
 \end{proposition}
 
-\noindent This proposition is inherited directly from the Loopix security analysis \cite{loopix}
-and we make no new claims about mixnet security.  Star-Mesh's contribution is the integration of
-this overlay with the hybrid post-quantum ratchet layer.
+\noindent This proposition is a direct restatement of the sender-receiver third-party
+unlinkability result established in Theorem~2 (proved in Appendix~A.2) of the Loopix security
+analysis \cite{loopix}; the specific formula above is derived from that theorem under the
+Poisson-mix model with cover traffic at rate $\lambda_{\mathrm{cover}}$.  We make no new claims
+about mixnet security.  Star-Mesh's contribution is the integration of this overlay with the
+hybrid post-quantum ratchet layer.
 
 % ============================================================
 \section{Bandwidth and Performance Analysis}
@@ -1086,7 +1120,7 @@ the relevant ML-KEM-768 and X25519 sizes.
 \midrule
 X25519    & 32 B    & 32 B              & 32 B \\
 ML-KEM-768 & 1184 B & 1088 B            & 32 B \\
-ML-DSA-65 & 1952 B  & N/A (sig: 3293 B) & N/A  \\
+ML-DSA-65 & 1952 B  & N/A (sig: 3{,}309 B) & N/A  \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1122,12 +1156,21 @@ Ratchet reply (PQ step)          & N/A                         & $+1{,}088$ (KEM
 \paragraph{Amortised Cost.}
 The PQ ratchet step adds $1{,}184 + 1{,}088 = 2{,}272$ bytes per round-trip.  Let $\Delta = 50$
 be the ratchet interval and let $\delta_{\text{DHT}}$ denote the per-message DHT overhead
-(key-routing records and mailbox polling headers).  The per-message overhead is:
+(key-routing records and mailbox polling headers).  The round-trip spans two independent
+directions: the ML-KEM public key ($|PQ\_pk| = 1{,}184$~B) is carried in Alice's outgoing
+messages amortised over $\Delta$ transmissions, and the corresponding ciphertext
+($|PQ\_ct| = 1{,}088$~B) is returned in Bob's replies amortised over a further $\Delta$
+receptions.  Computing the per-message overhead averaged across both directions gives a
+divisor of $2\Delta$:\footnote{Equivalently, the per-message-in-one-direction cost is
+$|PQ\_pk|/\Delta = 23.68$~B outgoing and $|PQ\_ct|/\Delta = 21.76$~B incoming; the
+$2\Delta$ formulation is the symmetric average.}
 \[
-  \text{Per-message overhead}
-    = \frac{|PQ\_pk| + |PQ\_ct|}{2\Delta} + \delta_{\text{DHT}}
-    = \frac{1{,}184 + 1{,}088}{2 \times 50} + \delta_{\text{DHT}}
-    = 22.72 + \delta_{\text{DHT}} \;\text{ bytes.}
+  \begin{aligned}
+    \text{Per-message overhead}
+      &= \frac{|PQ\_pk| + |PQ\_ct|}{2\Delta} + \delta_{\text{DHT}} \\
+      &= \frac{1{,}184 + 1{,}088}{2 \times 50} + \delta_{\text{DHT}}
+      = 22.72 + \delta_{\text{DHT}} \;\text{ bytes.}
+  \end{aligned}
 \]
 In our Kademlia deployment, a mailbox routing record consists of a 20-byte node ID plus an
 8-byte TTL field, and a polling header is 32 bytes.  As an illustrative engineering estimate
@@ -1139,7 +1182,29 @@ $12\%$--$16\%$, becoming negligible for larger payloads or media transmissions.
 
 \paragraph{Computational Cost.}
 ML-KEM-768 encapsulation and decapsulation execute in well under 1\,ms on modern hardware
-\cite{bos2018kyber}, triggered at most once every 50 messages. To validate the computational practicality of our protocol, we micro-benchmarked our Rust prototype over 1{,}000 iterations. On a modern workstation, the complete hybrid PQ-X3DH handshake (comprising Alice's initiator computations, Bob's responder computations, and the corresponding KEM encapsulation and decapsulation) completes in an average of $17.93$~ms. The post-quantum ratchet step (comprising key generation, encapsulation, decapsulation, and Root Key mixing) achieves a round-trip latency of $8.73$~ms. These execution times confirm that the computational overhead of hybrid post-quantum operations is highly practical for standard consumer hardware. The dominant computational overhead in Star-Mesh is expected to be the mixnet onion routing (Sphinx packet construction \cite{sphinx}), which requires multiple asymmetric operations per hop and is independent of the PQC primitives.
+\cite{bos2018kyber}, triggered at most once every 50 messages.
+To validate the computational practicality of our protocol, we micro-benchmarked our Rust
+prototype over 1{,}000 iterations on an Apple M1 Air (8-core CPU, macOS 26.5.2), compiled in
+Rust \texttt{release} mode (\texttt{opt-level = 3}, link-time optimisation enabled).  On this
+platform, the complete hybrid PQ-X3DH handshake (comprising Alice's initiator computations,
+Bob's responder computations, and the corresponding KEM encapsulation and decapsulation)
+completes in an average of $17.93$~ms, and the post-quantum ratchet step (key generation,
+encapsulation, decapsulation, and Root Key mixing) achieves a round-trip latency of $8.73$~ms.
+
+These figures are higher than the sub-millisecond primitive benchmarks reported for Kyber in
+\cite{bos2018kyber}, which measure optimised assembly implementations of the raw
+encapsulation/decapsulation operations in isolation.  The gap is explained by the sequential
+composition of multiple sub-operations in each handshake or ratchet step (two or three
+ML-KEM-768 operations, two or four X25519 scalar multiplications, one HKDF-SHA3-256 derivation,
+and the BLAKE3-KDF symmetric ratchet step), together with Rust runtime allocation, stack-frame
+costs, and RustCrypto library overhead absent from the C/assembly benchmarks of \cite{bos2018kyber}.
+A hardware-optimised, AVX2-enabled Rust build is expected to bring individual KEM operations
+close to the cited sub-millisecond figures; the end-to-end handshake latency is ultimately
+bounded by network round-trip time rather than CPU cost.
+These execution times confirm that the computational overhead of hybrid post-quantum operations
+is highly practical for standard consumer hardware.  The dominant computational overhead in
+Star-Mesh is expected to be the mixnet onion routing (Sphinx packet construction \cite{sphinx}),
+which requires multiple asymmetric operations per hop and is independent of the PQC primitives.
 
 % ============================================================
 \section{Assumptions and Limitations}
@@ -1183,6 +1248,10 @@ attacks, similarly to our PQ-X3DH.  However, PQXDH (i)~relies on centralized ser
 distribution and message routing, (ii)~does not integrate a post-quantum ratchet for ongoing
 sessions, and (iii)~uses Ed25519 (classical) for identity signatures, leaving identity
 authentication vulnerable to a CRQC.  Star-Mesh is designed to address all three gaps.
+The fundamental technical obstacle PQXDH does not confront is serverless pre-key distribution:
+moving post-quantum key bundles onto a decentralized DHT requires defending against eclipse
+and key-substitution attacks on multi-kilobyte PQ pre-key material without any trusted
+central arbiter, a problem that does not arise in Signal's centralized server model.
 
 \paragraph{Session Protocol and Briar.}
 Session \cite{session_protocol} routes messages through an onion network to achieve metadata
@@ -1190,18 +1259,35 @@ resistance and eliminates central servers.  Briar \cite{briar_design} routes thr
 achieve excellent decentralization and metadata resistance but use exclusively classical X25519
 for confidentiality, leaving them vulnerable to HNDL attacks.  Star-Mesh integrates hybrid PQC
 into a similar decentralized architecture.
+The technical obstacle these systems do not solve is the size incompatibility between
+post-quantum primitives and onion-routing packet disciplines: Tor and Sphinx-based mixnets
+enforce fixed-size cells or constant-size packets to prevent traffic analysis, but ML-DSA
+signatures and ML-KEM ciphertexts exceed these bounds, requiring non-trivial fragmentation or
+padding strategies that directly weaken the traffic-analysis resistance those networks are
+designed to provide.
 
 \paragraph{Double Ratchet Formal Analysis.}
 Cohn-Gordon et al.\ \cite{cohngordon2016} provided the first formal security analysis of the
 Signal Double Ratchet.  Cremers and Zhao\ \cite{dowling2020ratchet} extended this to a more
 fine-grained model.  Our security model and argument structure build directly on these works,
 extending them to the hybrid post-quantum setting with ML-KEM.
+The technical obstacle these analyses leave open is the adaptation of ratchet freshness
+semantics to KEM-based key exchange: classical DH-ratchet models assume commutativity and
+ephemerality properties that do not hold for KEMs, where the encapsulator and decapsulator
+roles are asymmetric and static public keys must be pre-distributed, forcing a new formal
+treatment of RNG-compromise recovery and one-time pre-key exhaustion that is absent from
+existing Double Ratchet proofs.
 
 \paragraph{PQ-MLS and Group Messaging.}
 RFC~9420 \cite{rfc9420} defines the base Messaging Layer Security (MLS) protocol for
 centralized group messaging; post-quantum extensions to MLS are an active area of
 standardization effort.  Star-Mesh targets asynchronous pairwise messaging over a DHT.
 The two protocol classes are complementary and address different deployment scenarios.
+The technical obstacle that prevents MLS-style designs from operating over a decentralized
+DHT is their dependence on a central Delivery Service to impose a total ordering on group
+operations and maintain tree consistency: without such a server, concurrent pre-key updates
+produce conflicting tree states that cannot be resolved without a global coordination
+mechanism, a problem that does not arise in Star-Mesh's pairwise ratchet setting.
 
 \paragraph{Hybrid KEM Composition.}
 Giacon et al.\ \cite{giacon2018kem} proved that the concatenation combiner for KEMs
@@ -1209,12 +1295,25 @@ achieves IND-CCA2 security if either component KEM is IND-CCA2 secure, provided 
 uses a suitable KDF modeled as a PRF (as established in \cite{giacon2018kem}).  Our
 hybrid KEM construction applies the composition results of \cite{giacon2018kem} with HKDF as
 the PRF (Assumption~\ref{asm:hkdf}).
+However, these static composition results do not extend to the stateful ratcheting setting:
+they bound the advantage of a single IND-CCA2 distinguisher against a one-shot encapsulation,
+but do not address the session-level forward secrecy and post-compromise recovery properties
+that arise when KEM shared secrets are fed into a continuously updated ratchet state machine
+where cached skip-keys and out-of-order delivery create additional exposure windows.
 
 \paragraph{Metadata Resistance.}
 Chaum \cite{chaum_mix} introduced mix networks; Piotrowska et al.\ \cite{loopix} developed the
 Loopix architecture providing provable anonymity under formal assumptions.  The Sphinx packet
 format \cite{sphinx} provides onion encryption with constant-size packets.  Star-Mesh inherits these results
 directly for its routing layer.
+The technical obstacle these systems leave unaddressed is the integration of large
+post-quantum key material into a constant-packet-size discipline: Loopix's anonymity proof
+assumes all packets are padded to a fixed size, but ML-DSA-87 signatures ($>4.5$~KB) and
+ML-KEM-1024 ciphertexts ($1.5$~KB) far exceed standard Sphinx MTUs, and na\"ively introducing
+these payloads forces fragmentation or re-padding that invalidates the constant-size assumption
+on which the anonymity bound depends.  Star-Mesh resolves this by selecting Category~3
+parameters (ML-KEM-768, ML-DSA-65) that keep the full authenticated pre-key bundle within
+standard MTU bounds, as argued in Section~\ref{sec:paramselection}.
 
 % ============================================================
 \section{Conclusion}
