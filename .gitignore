@@ -6,6 +6,7 @@
 *.pyc
 *.pyo
 *.pyd
+/convert.py
 
 # LaTeX build outputs
 /paper/*.aux
@@ -20,6 +21,7 @@
 /paper/*.run.xml
 /paper/*-blx.bib
 /paper/*.pdf
+/paper/paper.md
 
 # Also ignore root-level pdf and auxiliary files if any remain
 /*.pdf

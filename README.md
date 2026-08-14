@@ -1,90 +1,127 @@
-# Star-Mesh — Hybrid Post-Quantum Decentralized Messaging Protocol
+# Star-Mesh
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Star-Mesh is a research-grade, decentralized peer-to-peer secure messaging protocol providing **hybrid post-quantum confidentiality, forward secrecy, and post-compromise security**. It is described in the accompanying academic paper (see `paper/`), which is submitted / to be submitted to IACR ePrint.
+Star-Mesh is a protocol and systems research project investigating hybrid post-quantum message security in decentralized settings. The repository contains the conceptual protocol specification, the cryptographic state-machine design, a reference proof-of-concept, and the corresponding LaTeX manuscript.
 
-Unlike centralized architectures, Star-Mesh operates over a Kademlia Distributed Hash Table (DHT) for key distribution and uses a mixnet-based onion-routing overlay for metadata obfuscation.
+The project is intentionally narrow in scope: it focuses on the core security model rather than a full user-facing application. The design combines a hybrid key agreement layer, a double-ratchet session state, and a DHT-backed mailbox abstraction in order to evaluate how post-quantum confidentiality and forward secrecy interact with decentralized metadata exposure.
+
+## Research framing
+
+This work sits at the intersection of applied cryptography and distributed systems. The design emphasizes:
+
+- hybrid classical/post-quantum key establishment,
+- explicit forward secrecy and post-compromise recovery,
+- session state continuity under asynchrony,
+- metadata minimization through decentralized routing rather than centralized service assumptions.
+
+The repository is organized to support three primary uses:
+
+1. reading the protocol and design rationale,
+2. reproducing the core cryptographic demonstration,
+3. extending the manuscript and implementation artifacts in a consistent way.
 
 ---
 
-## Repository Structure
+## Repository map
 
-```
+```text
 Star-Mesh/
-├── docs/                      # Architectural & Cryptographic Specifications
-│   ├── construction.md        # Cryptographic construction and hybrid primitives
-│   ├── ratchet.md             # Ephemeral PQ Double Ratchet state machine spec
-│   └── roadmap.md             # Phased engineering roadmap and risk analysis
-├── paper/                     # Academic Paper (LaTeX source)
-│   ├── Makefile               # Builds paper.pdf with latexmk
-│   └── paper.tex              # Authoritative IACR ePrint draft (revised)
-├── poc/                       # Proof-of-Concept Implementations
-│   ├── python/
-│   │   └── poc.py             # Zero-dependency Python 3 PoC (verified working)
-│   └── rust/
-│       ├── Cargo.toml         # ml-kem, x25519-dalek, blake3, hkdf, zeroize
-│       └── src/
-│           └── main.rs        # High-fidelity Rust PoC
+├── README.md                  # Project overview and entry point
 ├── LICENSE                    # Apache License 2.0
-├── Makefile                   # Top-level: delegates to paper/Makefile
-└── README.md                  # This file
+├── Makefile                   # Primary build and execution entry points
+├── docs/                      # Research notes and protocol documentation
+│   ├── README.md              # Documentation index and reading guide
+│   ├── construction.md        # Hybrid cryptographic construction
+│   ├── ratchet.md             # Ratchet state machine specification
+│   ├── roadmap.md             # Engineering roadmap and milestones
+│   └── research-notes.md      # Additional design observations and open questions
+├── paper/                     # LaTeX source for the paper
+│   ├── Makefile               # Paper build pipeline
+│   ├── paper.tex              # Main manuscript source
+│   ├── paper.md               # Markdown export / draft companion
+│   └── ...                    # auxiliary LaTeX artifacts
+├── poc/                       # Reference implementations
+│   ├── python/
+│   │   └── poc.py             # Self-contained protocol demonstration
+│   └── rust/
+│       ├── Cargo.toml
+│       └── src/
+│           └── main.rs
+├── .venv/                     # Local Python environment for reproducible demo runs
+├── .gitignore
+└── convert.py                 # Compatibility helper for LaTeX-to-Markdown conversion
 ```
 
 ---
 
-## Running the Proof-of-Concept
+## Reproducible workflow
 
-### Python (zero dependencies — verified)
+The repository is intended to be read and exercised in a small number of standard ways.
 
-Uses the pinned `.venv` virtual environment:
+### Python demonstration
 
 ```bash
 .venv/bin/python3 poc/python/poc.py
 ```
 
-Expected output confirms four phases:
-1. **Phase 1** — Key generation for Alice and Bob
-2. **Phase 2** — Hybrid PQ-X3DH handshake OKM convergence ✅
-3. **Phase 3** — Symmetric ratchet message-key match ✅
-4. **Phase 4** — PQ ratchet round-trip and root-key convergence ✅
+This reference walk-through verifies the essential protocol behavior: key generation, hybrid handshake convergence, symmetric ratchet agreement, and PQ ratchet recovery.
 
-### Rust (requires Rust/Cargo)
+### Rust reference implementation
 
 ```bash
-cd poc/rust
-cargo run
+cargo run --manifest-path poc/rust/Cargo.toml
 ```
 
-Uses real cryptographic crates: `ml-kem` (FIPS 203), `x25519-dalek` (RFC 7748), `blake3`, `hkdf`, and `zeroize`.
+This path exercises the same protocol logic using concrete cryptographic crates. It is the closest implementation artifact to a production-grade prototype.
+
+### Paper build
+
+```bash
+make paper
+```
+
+or, from the project root:
+
+```bash
+make
+```
+
+The paper pipeline produces the manuscript under the paper directory and is intended as the canonical archival artifact for the design.
+
+### Build and maintenance helpers
+
+```bash
+make help
+make clean
+```
 
 ---
 
-## Compiling the Paper
+## Research reading path
 
-Requires a LaTeX distribution with `latexmk` and `pdflatex`:
+For a focused reading sequence, the repository is designed to be traversed in this order:
 
-```bash
-make          # builds paper/paper.pdf
-make clean    # removes auxiliary files
-```
+1. [README.md](README.md) — project framing and entry point.
+2. [docs/README.md](docs/README.md) — documentation map and narrative structure.
+3. [docs/construction.md](docs/construction.md) — cryptographic construction.
+4. [docs/ratchet.md](docs/ratchet.md) — ratchet state machine.
+5. [docs/roadmap.md](docs/roadmap.md) — engineering phases and validation targets.
+6. [paper/paper.tex](paper/paper.tex) — formal manuscript.
+
+This ordering reflects the research flow: protocol specification first, then operational engineering, then the formal write-up.
 
 ---
 
-## Cryptographic Construction
+## Current status
 
-Star-Mesh is a *hybrid* post-quantum protocol combining classical curves and NIST-standardized post-quantum primitives:
+This repository is best understood as a research prototype and specification artifact rather than a shipping application. The code is intentionally compact and explanatory, with a clear emphasis on protocol correctness and cryptographic reasoning over deployment polish.
 
-| Layer | Primitive | Role |
-|---|---|---|
-| Identity | ML-DSA-65 (FIPS 204) | Post-quantum signatures |
-| Handshake | X25519 + ML-KEM-768 (FIPS 203) | Hybrid PQ-X3DH key agreement |
-| Ratchet (PQ) | ML-KEM-768 ephemeral | Post-compromise security |
-| Ratchet (DH) | X25519 ephemeral | Classical forward secrecy |
-| Key Derivation | HKDF-SHA3-256, BLAKE3 | Chain/root key derivation |
-| AEAD | AES-256-GCM | Message encryption |
+The immediate objective is to maintain a clean, defensible line between:
 
-For the full formal treatment, see [`paper/paper.tex`](paper/paper.tex) and the specifications in [`docs/`](docs/).
+- the protocol specification,
+- the proof-of-concept implementation,
+- and the paper-level claims.
 
 ---
 
