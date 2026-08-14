@@ -3,7 +3,7 @@ use x25519_dalek::{StaticSecret, PublicKey as XPublicKey};
 use ml_kem::{MlKem768, EncapsulationKey, DecapsulationKey, Encapsulate, KeyExport, Seed};
 use ml_kem::kem::Decapsulate;
 use hkdf::Hkdf;
-use sha2::Sha256;
+use sha3::Sha3_256;
 use std::collections::HashMap;
 
 // Typings for convenience matching the paper's specs
@@ -68,10 +68,10 @@ pub struct BobSecretBundle {
     pub pq_otpk_sk: DecapsulationKey<MlKem768>,
 }
 
-/// Helper to run HKDF-SHA256 (paper uses SHA3-256; interface is identical)
-/// Implements Section 3.2 of the paper: OKM = HKDF(SS_hybrid, 0^32, info, L)
+/// Helper to run HKDF-SHA3-256 (paper.tex §3.4, Assumption 4.2)
+/// Implements Section 3.4 of the paper: OKM = HKDF-SHA3-256(SS_hybrid, 0^32, info, L)
 fn hkdf_derive(ikm: &[u8], salt: Option<&[u8]>, info: &[u8], len: usize) -> Result<Vec<u8>, CryptoError> {
-    let hk = Hkdf::<Sha256>::new(salt, ikm);
+    let hk = Hkdf::<Sha3_256>::new(salt, ikm);
     let mut okm = vec![0u8; len];
     hk.expand(info, &mut okm).map_err(|_| CryptoError::HkdfExpand)?;
     Ok(okm)

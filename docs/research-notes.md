@@ -56,7 +56,7 @@ The following items are the main open questions for further work.
 1. What is the appropriate metadata-minimization mechanism for real-world DHT querying without a centralized coordinator?
 2. How should ephemeral key state be handled under churn and reordering at scale?
 3. What is the minimum viable key-rotation policy that preserves both security and operational simplicity?
-4. Which MLE/HKDF choices are most defensible under a formal adversarial model that also accounts for implementation leakage?
+4. HKDF-SHA3-256 is established as the correct instantiation (paper.tex §2.4, Assumption 4.2). The remaining open question is whether any side-channel or timing leakage in the SHA3/Keccak permutation path is relevant under the protocol's threat model, and whether constant-time guarantees from the `sha3` crate are sufficient.
 
 ## 6. Publication perspective
 

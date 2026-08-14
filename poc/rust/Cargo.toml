@@ -14,9 +14,9 @@ path = "src/main.rs"
 ml-kem   = { version = "0.3",  features = ["zeroize"] }
 # RFC 7748 X25519 Diffie-Hellman
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-# HKDF-SHA-256 (paper uses SHA-3; interface is identical)
+# HKDF-SHA3-256 — matches paper.tex §3.4 and Assumption 4.2 exactly
 hkdf  = "0.12"
-sha2  = "0.10"
+sha3  = "0.10"
 # BLAKE3 for symmetric ratchet
 blake3 = "1"
 # rand 0.10 + rand_core 0.10 — SysRng/ThreadRng satisfies ml-kem/kem CryptoRng bound
