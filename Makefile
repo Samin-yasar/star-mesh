@@ -1,5 +1,9 @@
 .PHONY: help all paper python-poc rust-poc clean
 
+PYTHON ?= python3
+VENV_DIR := .venv
+VENV_PYTHON := $(VENV_DIR)/bin/python3
+
 help:
 	@echo "Star-Mesh research repository"
 	@echo ""
@@ -15,8 +19,11 @@ all: paper
 paper:
 	$(MAKE) -C paper all
 
-python-poc:
-	.venv/bin/python3 poc/python/poc.py
+$(VENV_PYTHON):
+	$(PYTHON) -m venv $(VENV_DIR)
+
+python-poc: $(VENV_PYTHON)
+	$(VENV_PYTHON) poc/python/poc.py
 
 rust-poc:
 	cargo run --manifest-path poc/rust/Cargo.toml

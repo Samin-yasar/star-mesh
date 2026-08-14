@@ -62,10 +62,11 @@ The repository is intended to be read and exercised in a small number of standar
 ### Python demonstration
 
 ```bash
+python3 -m venv .venv
 .venv/bin/python3 poc/python/poc.py
 ```
 
-This reference walk-through verifies the essential protocol behavior: key generation, hybrid handshake convergence, symmetric ratchet agreement, and PQ ratchet recovery.
+This creates a fresh local virtual environment on the host machine so the executable does not depend on a machine-specific Xcode Python path. The reference walk-through verifies the essential protocol behavior: key generation, hybrid handshake convergence, symmetric ratchet agreement, and PQ ratchet recovery.
 
 ### Rust reference implementation
 
