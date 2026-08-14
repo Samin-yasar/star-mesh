@@ -1,6 +1,7 @@
 # Star-Mesh
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.21908681-blue?logo=doi)](https://doi.org/10.5281/zenodo.21908681)
 
 Star-Mesh is a protocol and systems research project investigating hybrid post-quantum message security in decentralized settings. The repository contains the conceptual protocol specification, the cryptographic state-machine design, a reference proof-of-concept, and the corresponding LaTeX manuscript.
 
