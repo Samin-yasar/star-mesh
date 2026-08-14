@@ -2,39 +2,50 @@
 
 ## Reporting Security Vulnerabilities
 
-If you discover a security vulnerability in Star-Mesh, please **do not** open a public GitHub issue. Instead, follow these responsible disclosure guidelines.
+Star-Mesh is a research prototype and protocol specification intended for cryptographic and systems research, protocol analysis, and implementation experimentation. If you discover a security vulnerability in this repository, please **do not** open a public GitHub issue. Instead, follow these responsible disclosure guidelines.
+
+For a broader statement of scope, limitations, and implementation guidance, see [DISCLAIMER.md](DISCLAIMER.md).
 
 ### Reporting Process
 
-1. **Email**: Send a detailed report to your security contact with:
+Use the repository's private vulnerability reporting flow on GitHub:
+
+1. **Preferred channel**: Submit a report via GitHub Security Advisories for this repository:
+   https://github.com/Samin-yasar/star-mesh/security/advisories/new
+
+2. Include the following in your report:
    - Description of the vulnerability
    - Affected component(s) and version(s)
    - Steps to reproduce (if applicable)
    - Potential impact assessment
    - Suggested fix (if available)
 
-2. **Timeline**:
+3. **Timeline**:
    - Initial response: Within 48 hours
    - Security assessment: Within 1 week
    - Patch development: 2–4 weeks (depending on severity)
    - Coordinated disclosure: After patch release
 
-3. **Eligibility**:
+4. **Eligibility**:
    - Vulnerabilities in cryptographic implementations
    - Issues affecting Forward Secrecy (FS) or Post-Compromise Security (PCS)
    - Incorrect FIPS 203 / RFC 7748 / RFC 5869 implementations
    - Secret key material exposure or leakage
 
+> If private reporting is unavailable in the repository settings, the maintainer should enable GitHub's private security advisories before publishing this policy as the canonical disclosure path.
+
 ### Out of Scope
 
-The following are **not** considered security vulnerabilities:
-- Denial of Service (DoS) in PoC implementation (not production-ready)
+The following are **not** considered security vulnerabilities for the purposes of this repository:
+- Denial of Service (DoS) in the prototype implementation, unless it reflects a realistic deployment issue
 - Social engineering or user credential compromise
 - Network infrastructure attacks (DNS hijacking, BGP hijacking)
-- Research hypotheticals not affecting current protocol version
-- Documentation or configuration errors
+- Research hypotheticals that do not affect the current protocol design or implementation
+- Documentation or configuration errors unrelated to the protocol or code path
 
 ## Security Guarantees
+
+These claims describe the properties evaluated in the current prototype and protocol model. They are not guarantees for a production deployment without additional hardening, authentication, and operational controls.
 
 ### What Star-Mesh Provides
 
@@ -203,9 +214,9 @@ Not yet compliant:
 
 ## Contact & Support
 
-**Security inquiries**: [Your security contact / email]  
-**General support**: [GitHub Issues](https://github.com/yourusername/Star-Mesh)  
-**Bug reports**: [GitHub Issues](https://github.com/yourusername/Star-Mesh/issues)
+**Security inquiries**: GitHub Security Advisories for this repository: https://github.com/Samin-yasar/star-mesh/security/advisories/new  
+**General support**: [GitHub Issues](https://github.com/Samin-yasar/star-mesh/issues)  
+**Bug reports**: [GitHub Issues](https://github.com/Samin-yasar/star-mesh/issues)
 
 ---
 
