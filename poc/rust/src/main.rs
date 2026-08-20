@@ -3,12 +3,14 @@ use x25519_dalek::{StaticSecret, PublicKey as XPublicKey};
 use ml_kem::{MlKem768, EncapsulationKey, DecapsulationKey, Encapsulate, KeyExport, Seed};
 use ml_kem::kem::Decapsulate;
 use hkdf::Hkdf;
+use hkdf::hmac::{Hmac, Mac};
 use sha3::Sha3_256;
 use std::collections::HashMap;
 
 // Typings for convenience matching the paper's specs
 type Key32 = [u8; 32];
 type Key64 = [u8; 64];
+type HmacSha3_256 = Hmac<Sha3_256>;
 
 /// Error type for cryptographic operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +18,7 @@ pub enum CryptoError {
     HkdfExpand,
     InvalidState,
     NoChainKey,
+    AuthenticationFailed,
 }
 
 impl std::fmt::Display for CryptoError {
@@ -24,6 +27,7 @@ impl std::fmt::Display for CryptoError {
             Self::HkdfExpand => write!(f, "HKDF expand failed"),
             Self::InvalidState => write!(f, "Invalid ratchet state"),
             Self::NoChainKey => write!(f, "No chain key available"),
+            Self::AuthenticationFailed => write!(f, "Handshake confirmation failed"),
         }
     }
 }
@@ -95,6 +99,7 @@ pub struct HandshakeMessageM0 {
     pub ct_pq1: ml_kem::Ciphertext<MlKem768>,
     pub ct_pq2: ml_kem::Ciphertext<MlKem768>,
     pub prekey_id: String,
+    pub confirmation_tag: [u8; 32],
 }
 
 /// 3.2 Hybrid PQ-X3DH Handshake (Initiator Side)
@@ -159,6 +164,15 @@ pub fn pq_x3dh_initiator(
     let mut okm = [0u8; 64];
     okm.copy_from_slice(&okm_bytes);
 
+    let mut confirm_info = b"StarMesh-Confirm".to_vec();
+    confirm_info.extend_from_slice(&info);
+    let confirmation_key = hkdf_derive(&okm, Some(&[0u8; 32]), &confirm_info, 32)?;
+    let mut confirmation_mac = HmacSha3_256::new_from_slice(&confirmation_key)
+        .map_err(|_| CryptoError::HkdfExpand)?;
+    confirmation_mac.update(&info);
+    let mut confirmation_tag = [0u8; 32];
+    confirmation_tag.copy_from_slice(&confirmation_mac.finalize().into_bytes());
+
     let m0 = HandshakeMessageM0 {
         alice_ik_dsa_pk: alice_ik_dsa_pk.to_vec(),
         alice_ik_dh_pk: *alice_ik_dh_pk,
@@ -166,6 +180,7 @@ pub fn pq_x3dh_initiator(
         ct_pq1,
         ct_pq2,
         prekey_id: "otpk_1".to_string(),
+        confirmation_tag,
     };
 
     Ok((okm, m0))
@@ -223,6 +238,16 @@ pub fn pq_x3dh_responder(
     info.extend_from_slice(ct_pq2_bytes);
 
     let okm_bytes = hkdf_derive(&ss_hybrid, Some(&[0u8; 32]), &info, 64)?;
+    let mut confirm_info = b"StarMesh-Confirm".to_vec();
+    confirm_info.extend_from_slice(&info);
+    let confirmation_key = hkdf_derive(&okm_bytes, Some(&[0u8; 32]), &confirm_info, 32)?;
+    let mut confirmation_mac = HmacSha3_256::new_from_slice(&confirmation_key)
+        .map_err(|_| CryptoError::HkdfExpand)?;
+    confirmation_mac.update(&info);
+    confirmation_mac
+        .verify_slice(&m0.confirmation_tag)
+        .map_err(|_| CryptoError::AuthenticationFailed)?;
+
     let mut okm = [0u8; 64];
     okm.copy_from_slice(&okm_bytes);
 
@@ -232,6 +257,7 @@ pub fn pq_x3dh_responder(
 /// 3.3 Ratchet State struct
 pub struct RatchetState {
     pub root_key: Key32,
+    pub entropy_pool: Key32,
     pub send_chain_key: Option<Key32>,
     pub recv_chain_key: Option<Key32>,
     pub pq_sk_local: Option<DecapsulationKey<MlKem768>>,
@@ -263,6 +289,7 @@ impl RatchetState {
 
         Self {
             root_key,
+            entropy_pool: root_key,
             send_chain_key,
             recv_chain_key,
             pq_sk_local: None,
@@ -309,7 +336,7 @@ impl RatchetState {
     ) -> Result<ml_kem::Ciphertext<MlKem768>, CryptoError> {
         // encapsulate_with_rng returns (Ciphertext, SharedKey) — not a Result
         let (ct, ss_pq) = remote_pq_pk.encapsulate_with_rng(&mut rand::rng());
-        self.mix_pq_secret(ss_pq.as_ref())?;
+        self.mix_pq_secret(ss_pq.as_ref(), ct.as_ref())?;
         Ok(ct)
     }
 
@@ -320,13 +347,18 @@ impl RatchetState {
         let sk = self.pq_sk_local.take().ok_or(CryptoError::InvalidState)?;
         // decapsulate() is infallible in ML-KEM (implicit rejection per FIPS 203 §7.3)
         let ss_pq = sk.decapsulate(ct);
-        self.mix_pq_secret(ss_pq.as_ref())?;
+        self.mix_pq_secret(ss_pq.as_ref(), ct.as_ref())?;
         // sk is dropped here, clearing the decapsulation key from memory (Zeroize via Drop)
         Ok(())
     }
 
-    fn mix_pq_secret(&mut self, ss_pq: &[u8]) -> Result<(), CryptoError> {
-        let out = hkdf_derive(ss_pq, Some(&self.root_key), b"StarMesh-PQ-RK", 64)?;
+    fn mix_pq_secret(&mut self, ss_pq: &[u8], ciphertext: &[u8]) -> Result<(), CryptoError> {
+        let mut pool_info = b"StarMesh-EntropyPool".to_vec();
+        pool_info.extend_from_slice(ciphertext);
+        let next_pool = hkdf_derive(ss_pq, Some(&self.entropy_pool), &pool_info, 32)?;
+        self.entropy_pool.copy_from_slice(&next_pool);
+
+        let out = hkdf_derive(ss_pq, Some(&next_pool), b"StarMesh-PQ-RK", 64)?;
         self.root_key.copy_from_slice(&out[0..32]);
         self.send_chain_key = Some({
             let mut ck = [0u8; 32];
@@ -465,7 +497,7 @@ fn run() -> Result<(), CryptoError> {
     println!("    ✔  Hybrid SS derivation:  SS_hybrid = 0xFF||SS_cl||SS_PQ1||SS_PQ2");
     println!("    ✔  HKDF binding with transcript: OKM = HKDF(SS_hybrid, 0^32, info, 64)");
     println!("    ✔  Symmetric ratchet:     MK = BLAKE3-KDF(CK, 0x01, info)");
-    println!("    ✔  PQ ratchet update:     RK,CK = HKDF(SS_PQ, RK, 'StarMesh-PQ-RK', 64)");
+    println!("    ✔  PQ ratchet update:     EP' = HKDF(SS_PQ, EP, 'EntropyPool'||ct); RK,CK = HKDF(SS_PQ, EP', 'StarMesh-PQ-RK', 64)");
     println!("    ✔  Secret clearance:      pq_sk_local dropped after decapsulation");
 
     run_benchmarks()?;
@@ -505,32 +537,54 @@ fn run_benchmarks() -> Result<(), CryptoError> {
         pq_otpk_sk: bob_pq_otpk_sk,
     };
 
-    // 1. Handshake Benchmark
-    let start_handshake = std::time::Instant::now();
+    // 1. Handshake Benchmark (individual timings in microseconds)
+    let mut handshake_times = Vec::with_capacity(1000);
     for _ in 0..1000 {
+        let start = std::time::Instant::now();
         let (_okm_alice, m0) = pq_x3dh_initiator(
             &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
         )?;
         let _okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0)?;
+        handshake_times.push(start.elapsed().as_nanos() as f64 / 1000.0);
     }
-    let duration_handshake = start_handshake.elapsed() / 1000;
 
-    // 2. PQ Ratchet Benchmark
+    // 2. PQ Ratchet Benchmark (individual timings in microseconds)
     let mut alice_state = RatchetState::new(&[0u8; 64], true);
     let mut bob_state = RatchetState::new(&[0u8; 64], false);
     bob_state.recv_chain_key = alice_state.send_chain_key;
 
-    let start_ratchet = std::time::Instant::now();
+    let mut ratchet_times = Vec::with_capacity(1000);
     for _ in 0..1000 {
+        let start = std::time::Instant::now();
         let alice_pq_pk = alice_state.pq_ratchet_init();
         let ct_pq = bob_state.pq_ratchet_encapsulate(&alice_pq_pk)?;
         alice_state.pq_ratchet_decapsulate(&ct_pq)?;
+        ratchet_times.push(start.elapsed().as_nanos() as f64 / 1000.0);
     }
-    let duration_ratchet = start_ratchet.elapsed() / 1000;
 
-    println!("  Average latency results (1,000 iterations):");
-    println!("    ✔  PQ-X3DH Handshake (initiator + responder): {:?}", duration_handshake);
-    println!("    ✔  PQ Ratchet Round-trip (init + encaps + decaps): {:?}", duration_ratchet);
+    println!("  Micro-benchmark results (1,000 iterations):");
+    
+    let print_stats = |name: &str, mut times: Vec<f64>| {
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let len = times.len();
+        let sum: f64 = times.iter().sum();
+        let mean = sum / len as f64;
+        let variance: f64 = times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / len as f64;
+        let std_dev = variance.sqrt();
+        let p50 = times[len / 2];
+        let p95 = times[(len as f64 * 0.95) as usize];
+        let p99 = times[(len as f64 * 0.99) as usize];
+        println!("    ✔  {}:", name);
+        println!("        Mean:    {:.3} µs", mean);
+        println!("        Std Dev: {:.3} µs", std_dev);
+        println!("        p50:     {:.3} µs", p50);
+        println!("        p95:     {:.3} µs", p95);
+        println!("        p99:     {:.3} µs", p99);
+    };
+
+    print_stats("PQ-X3DH Handshake (initiator + responder)", handshake_times);
+    print_stats("PQ Ratchet Round-trip (init + encaps + decaps)", ratchet_times);
+
     Ok(())
 }
 

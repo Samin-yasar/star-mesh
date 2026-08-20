@@ -42,7 +42,10 @@ Bundle_A = { IK_DSA_pk_A, IK_DH_pk_A, SPK_pk_A, PQ_SPK_pk_A,
              OTPK_pk_A, PQ_OTPK_pk_A, σ_A }
 ```
 
-where `σ_A = ML-DSA-65.Sign(IK_DSA_sk_A, BundlePayload_A)`.
+where `σ_A = ML-DSA-65.Sign(IK_DSA_sk_A, BundlePayload_A)` and
+`BundlePayload_A` includes the protocol label, `IK_DSA_pk_A`, `IK_DH_pk_A`, and every
+published pre-key (with batch hashes for OTPKs). A fetcher must also verify that the DHT
+lookup key equals `SHA3_256(IK_DSA_pk_A)` from the signed bundle.
 
 - `OTPK_pk_A` — batch of one-time X25519 pre-keys.
 - `PQ_OTPK_pk_A` — batch of one-time ML-KEM-768 pre-keys (critical for per-session PQ-FS).
@@ -105,12 +108,18 @@ OKM = HKDF-SHA3-256(ikm=SS_hybrid, salt=0^32, info=info, L=64)
 - `OKM[0:32]` → Root Key `RK`
 - `OKM[32:64]` → Sending Chain Key `CK_s`
 
+Alice derives `K_conf = HKDF(OKM, 0^32, "StarMesh-Confirm" || info, 32)` and includes
+`tag_A = HMAC-SHA3-256(K_conf, M0_core)` in `M_0`. Bob verifies `tag_A`, then returns
+`tag_B = HMAC-SHA3-256(K_conf, "Bob" || M0_core)`. Alice verifies `tag_B` before treating the
+session as mutually confirmed. The tag in `M_0` alone is one-sided explicit confirmation, not
+mutual authentication.
+
 Bob immediately zeroizes `PQ_OTPK_sk_B` after decapsulation, cementing per-session PQ-FS.
 
 **Handshake message Alice transmits:**
 
 ```
-M_0 = (IK_DSA_pk_A, IK_DH_pk_A, EK_pk_A, ct_1, ct_2, prekey_id)
+M_0 = (IK_DSA_pk_A, IK_DH_pk_A, EK_pk_A, ct_1, ct_2, prekey_id, tag_A)
 ```
 
 ---

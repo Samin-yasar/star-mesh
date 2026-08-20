@@ -91,9 +91,15 @@
 \newcommand{\Decaps}{\mathsf{Decaps}}
 \newcommand{\Sign}{\mathsf{Sign}}
 \newcommand{\Verify}{\mathsf{Verify}}
+\newcommand{\HMAC}{\mathsf{HMAC}}
 \newcommand{\KeyGen}{\mathsf{KeyGen}}
 % Fixed-width byte-length encoding
 \newcommand{\flen}[1]{\mathsf{len}_{32}(#1)}
+% Ordered-concatenation of a batch of keys (replaces non-standard \bigoplus usage)
+\newcommand{\bigcat}[2]{\displaystyle\mathop{\Vert}_{#1} #2}
+% String literals in protocol formulas (rendered cleanly in text tt font)
+\newcommand{\strlit}[1]{\text{\upshape\texttt{"#1"}}}
+\newcommand{\hexlit}[1]{\text{\upshape\texttt{#1}}}
 % Hybrid game shorthand
 \newcommand{\Hgame}[1]{\mathbf{H}_{#1}}
 
@@ -146,10 +152,12 @@ quantum-capable adversary.
 incorporating ephemeral ML-KEM exchanges, and give game-based security definitions for
 Hybrid Post-Quantum Forward Secrecy (PQ-FS) and Post-Compromise Security (PCS) that explicitly
 integrate RNG compromise into the freshness condition.
-(3)~We sketch game-based security arguments: PQ-FS is argued to follow from the IND-CCA2
-security of ML-KEM-768, PCS restoration is argued after one complete ratchet round-trip (with
-explicit caveats on out-of-order delivery and the skipped-key cache), and authentication
-security is argued under EUF-CMA security of ML-DSA-65~\cite{nist_fips204}.
+(3)~We provide game-based security arguments for PQ-FS (reducing to IND-CCA2 of ML-KEM-768),
+PCS restoration (one complete ratchet round-trip suffices, with explicit caveats on out-of-order
+delivery and the skipped-key cache), and authentication (EUF-CMA of ML-DSA-65~\cite{nist_fips204}).
+We additionally supply a machine-checked ProVerif model~\cite{proverif} verifying four properties:
+pre-compromise forward secrecy, PCS healing after one PQ round-trip, the skipped-key cache caveat
+(Corollary~5.5, Caveat~2), and post-heal message agreement.
 (4)~We provide a bandwidth and performance analysis showing that the PQ overhead amortises to
 approximately $22.7 + \delta_{\text{DHT}}$ bytes per message at ratchet interval $\Delta = 50$,
 where $\delta_{\text{DHT}}$ denotes the DHT routing overhead.
@@ -181,10 +189,11 @@ through onion-routing networks, but they remain committed exclusively to classic
 elliptic-curve primitives (X25519), leaving them vulnerable to HNDL attacks.
 
 \paragraph{Our Approach.}
-Star-Mesh synthesizes three independently mature technologies: (1)~NIST-standardized
-post-quantum cryptography \cite{nist_fips203,nist_fips204}, (2)~Kademlia DHT \cite{kademlia}
-for decentralized key distribution, and (3)~mixnet-style onion routing \cite{chaum_mix,loopix}
-for metadata resistance.  The cryptographic core is a \emph{hybrid} PQ-X3DH handshake followed
+Star-Mesh synthesizes three mature technologies:
+(1)~NIST PQC standards \cite{nist_fips203,nist_fips204},
+(2)~Kademlia DHT \cite{kademlia} for decentralized key distribution, and
+(3)~mixnet-style onion routing \cite{chaum_mix,loopix} for metadata resistance.
+The cryptographic core is a \emph{hybrid} PQ-X3DH handshake followed
 by a hybrid PQ Double Ratchet, building on the classical Double Ratchet analysis of Cohn-Gordon
 et al.\ \cite{cohngordon2016} and the Signal X3DH specification \cite{marlinspike_x3dh}.
 
@@ -199,7 +208,7 @@ CRQC-equipped adversary (via ML-KEM, whose security reduces to Module-LWE
 
 Formally, the hybrid shared secret is computed as
 \[
-  SS_{\text{hybrid}} = \texttt{0xFF} \;\|\; SS_{cl} \;\|\; SS_{PQ1} \;\|\; SS_{PQ2}
+  SS_{\text{hybrid}} = \hexlit{0xFF} \;\|\; SS_{cl} \;\|\; SS_{PQ1} \;\|\; SS_{PQ2}
 \]
 passed through HKDF-SHA3-256 with the ciphertexts $ct_1, ct_2$ and the classical ephemeral public key $EK_{pk,A}$ bound into the KDF input string $info$. Under this model, following the analysis of Giacon et al.\ \cite{giacon2018kem}, the concatenation combiner ensures that the derived key is pseudorandom and IND-CCA2 secure if either $SS_{cl}$ or the combination of $SS_{PQ1}$ and $SS_{PQ2}$ remains secure under the stated assumptions; binding the transcript (ephemeral key and ciphertexts) satisfies the theorem's precondition, defending against related-ciphertext/re-encapsulation attacks. HKDF is modeled as a PRF in all proof sketches (see Assumption~\ref{asm:hkdf} in Section~\ref{sec:secmodel}). Our security claims rely specifically on the concatenation-combiner setting analyzed in \cite{giacon2018kem}.
 
@@ -228,7 +237,10 @@ Section~\ref{sec:assumptions}.
         Category~3 parameter analysis (Section~\ref{sec:paramselection}).
   \item \textbf{Security analysis:} Game-based security arguments for PQ-FS and PCS against
         IND-CCA2 of ML-KEM-768, and for authentication against EUF-CMA of ML-DSA-65.  All
-        hybrid arguments are spelled out with named intermediate games.
+        hybrid arguments are spelled out with named intermediate games.  Separately, a
+        machine-checked ProVerif~\cite{proverif} model verifies session-key secrecy, MITM
+        resistance, pre-compromise forward secrecy, PCS healing, and the skipped-key cache
+        caveat in the Dolev-Yao attacker model.
   \item \textbf{Metadata resistance under PQC overhead:} Analysis of the mixnet overlay
         achieving sender-receiver unlinkability under standard mixnet assumptions \cite{loopix},
         with an explicit argument that Category~3 parameter sizes preserve the constant-packet-size
@@ -243,13 +255,26 @@ Section~\ref{sec:assumptions}.
 \paragraph{Scope and Proof Status.}
 This work is intended as a research-oriented protocol design and security-analysis preprint
 for public dissemination on a preprint server.  The game-based arguments in
-Sections~\ref{sec:security} should be interpreted as structured proof sketches rather than
+Section~\ref{sec:security} should be interpreted as structured proof sketches rather than
 fully mechanized or reduction-tight proofs in a composable framework.  In particular, we do
-not claim a complete UC-style treatment of the protocol \cite{uc_framework}, nor a full
-machine-verified analysis of the ratchet state machine.  Our goal is to provide a precise
-cryptographic design together with explicit assumptions, adversarial capabilities, and
-security-reduction intuition sufficient to support further peer review, implementation, and
-formalization work.
+not claim a complete UC-style treatment of the protocol \cite{uc_framework}.  To complement
+the proof-sketch arguments, we provide a machine-checked ProVerif~\cite{proverif} model
+(\texttt{formal/pq\_x3dh.pv} and \texttt{formal/ratchet.pv} in the repository) that verifies,
+in the symbolic Dolev-Yao model, the following properties: session-key secrecy under long-term
+key reveal, MITM resistance via bundle-signature authentication, pre-compromise forward secrecy,
+PCS healing after one complete PQ round-trip, and the skipped-key cache caveat
+(Corollary~\ref{cor:pcs}, Caveat~2).  These are supplementary symbolic checks and do
+not replace the computational reductions; they provide independent evidence of the protocol
+logic against a symbolic adversary.
+
+\paragraph{UC formulation status.}
+The repository now specifies a candidate ideal functionality $\mathcal{F}_{\mathrm{SM}}$ in
+\texttt{docs/uc-formulation.md}.  It exposes registration, asynchronous delivery, ratchet epochs,
+state compromise, recovery, and an explicit mixnet leakage interface rather than assuming perfect
+traffic-flow hiding.  This is a proof target and not a theorem: a UC realization claim requires a
+real/ideal interface, an environment and simulator, composable corruption semantics, and a
+computational indistinguishability proof.  In particular, the existing pairwise games and
+ProVerif models do not establish UC security.
 
 \paragraph{Research Positioning.}
 Star-Mesh should be viewed as a protocol-design and analysis contribution rather than a
@@ -257,8 +282,7 @@ production-ready messaging system.  The present manuscript focuses on architectu
 adversarial modeling, and hybrid post-quantum ratcheting semantics in a preprint setting,
 where the goal is to surface a precise design and a clear security model for peer review.
 A production deployment would additionally require extensive implementation hardening,
-empirical evaluation, interoperability testing, formal verification, and operational
-abuse-resistance analysis.
+empirical evaluation, interoperability testing, and operational abuse-resistance analysis.
 
 \paragraph{Paper Organization.}
 Section~\ref{sec:prelim} introduces notation and primitives.
@@ -401,8 +425,10 @@ Loopix threat model \cite{loopix}.
 
 \subsection{Key Generation and Identity}
 
-Each node derives its cryptographic material from a 128-bit master seed
-$\mathsf{seed} \getsr \bits^{128}$ via deterministic key generation.  A node's \emph{Identity
+Each node derives its cryptographic material from a 256-bit master seed
+$\mathsf{seed} \getsr \bits^{256}$ via deterministic key generation.  A 256-bit seed aligns
+the root-of-trust entropy with the Category~3 security margin targeted by the ML-KEM-768 and
+ML-DSA-65 parameter choices (Section~\ref{sec:paramselection}).  A node's \emph{Identity
 Bundle} comprises:
 \begin{itemize}
   \item $IK^{DSA} = (IK^{DSA}_{pk}, IK^{DSA}_{sk}) \getsr \MLDSA.\KeyGen(1^\lambda)$: the
@@ -434,21 +460,27 @@ Node $A$ publishes the following signed bundle to the DHT, keyed by $H(IK^{DSA}_
 The signature $\sigma$ is computed over \emph{all} public pre-key material to prevent
 substitution of individual pre-keys by a DHT adversary:
 \begin{align*}
-  \mathsf{BundlePayload} &=
-        SPK_{pk} \;\|\; PQ\_SPK_{pk} \\
-        &\quad\|\; \flen{\bigoplus_{i} OTPK_{pk,i}}
-             \;\|\; H\!\left(\bigoplus_{i} OTPK_{pk,i}\right) \\
-        &\quad\|\; \flen{\bigoplus_{j} PQ\_OTPK_{pk,j}}
-             \;\|\; H\!\left(\bigoplus_{j} PQ\_OTPK_{pk,j}\right) \\[4pt]
+      \mathsf{BundlePayload} &=
+                        \strlit{StarMesh-Bundle-v1} \;\|\;
+                        IK^{DSA}_{pk} \;\|\; IK^{DH}_{pk} \;\|\;
+                        SPK_{pk} \;\|\; PQ\_SPK_{pk} \\
+        &\quad\|\; \flen{\bigcat{i}{OTPK_{pk,i}}}
+             \;\|\; H\!\left(\bigcat{i}{OTPK_{pk,i}}\right) \\
+        &\quad\|\; \flen{\bigcat{j}{PQ\_OTPK_{pk,j}}}
+             \;\|\; H\!\left(\bigcat{j}{PQ\_OTPK_{pk,j}}\right) \\[4pt]
   \sigma &= \MLDSA.\Sign(IK^{DSA}_{sk},\; \mathsf{BundlePayload})
 \end{align*}
-where $H$ is SHA3-256 and $\bigoplus$ denotes ordered concatenation of all keys in the batch.
+where $H$ is SHA3-256 and $\bigcat{i}{X_i} = X_1 \| X_2 \| \cdots$ denotes the ordered
+concatenation of all keys in the batch (not XOR; we use $\|$ throughout for concatenation).
 Signing the hashes of the full OTPK and PQ-OTPK batches (rather than individual keys) binds
 the entire batch to $\sigma$ without inflating the signed payload size; an adversary cannot
-substitute any individual OTPK or PQ-OTPK without invalidating $\sigma$.
+substitute any identity key, pre-key, or individual OTPK/PQ-OTPK without invalidating
+$\sigma$.  A fetcher must also reject a record unless its DHT lookup key equals
+$H(IK^{DSA}_{pk})$ from the signed bundle; the signing key is therefore not chosen solely
+from an attacker-controlled record.
 
 Any node fetching $\mathsf{Bundle}_A$ verifies $\sigma$ against the reconstructed
-$\mathsf{BundlePayload}$ before use.
+$\mathsf{BundlePayload}$ and checks the lookup-key equality before use.
 
 \begin{remark}
 \label{rem:spkonly}
@@ -469,8 +501,8 @@ minimize exposure in this mode.
 \subsection{Hybrid PQ-X3DH Handshake}
 \label{sec:x3dh}
 
-Alice (initiator) fetches Bob's bundle from the DHT, verifies $\sigma_B$ over the full
-$\mathsf{BundlePayload}_B$, and executes the following handshake.  The design extends Signal's
+Alice (initiator) fetches Bob's bundle from the DHT, verifies $\sigma_B$
+over $\mathsf{BundlePayload}_B$, and executes the handshake. The design extends Signal's
 X3DH \cite{marlinspike_x3dh} with parallel ML-KEM encapsulations.
 
 \paragraph{Step 1 --- Classical X3DH Component.}
@@ -495,7 +527,7 @@ The Associated Data binds the handshake to both parties' post-quantum signing id
 preventing identity misbinding and Unknown Key-Share (UKS)-class attacks (originally
 demonstrated for STS) \cite{blake1997unknown}:
 \[
-  AD = \texttt{``StarMesh''} \| \flen{IK^{DSA}_{pk,A}} \| IK^{DSA}_{pk,A}
+  AD = \strlit{StarMesh} \| \flen{IK^{DSA}_{pk,A}} \| IK^{DSA}_{pk,A}
                            \| \flen{IK^{DSA}_{pk,B}} \| IK^{DSA}_{pk,B}
 \]
 To satisfy the IND-CCA2 security precondition of the concatenation/split-key combiner proved by Giacon et al.~\cite{giacon2018kem}, the KEM ciphertexts and the classical ephemeral public key are bound into the HKDF input. The binder string $info$ is constructed by appending the length-prefixed transcript parameters to $AD$:
@@ -503,9 +535,9 @@ To satisfy the IND-CCA2 security precondition of the concatenation/split-key com
   info = AD \| \flen{EK_{pk,A}} \| EK_{pk,A} \| \flen{ct_1} \| ct_1 \| \flen{ct_2} \| ct_2
 \]
 The hybrid input key material is formed by combining classical and post-quantum secrets with a
-domain-separation prefix byte $\texttt{0xFF}$ (following \cite{bindel2018hybrid}):
+domain-separation prefix byte $\hexlit{0xFF}$ (following \cite{bindel2018hybrid}):
 \[
-  SS_{\text{hybrid}} = \texttt{0xFF} \| SS_{cl} \| SS_{PQ1} \| SS_{PQ2}
+  SS_{\text{hybrid}} = \hexlit{0xFF} \| SS_{cl} \| SS_{PQ1} \| SS_{PQ2}
 \]
 The 64-byte Output Keying Material is then:
 \[
@@ -522,20 +554,36 @@ ratchet is therefore intentional and semantically justified.
 
 The first 32 bytes of $OKM$ initialize the Root Key $RK$; the second 32 bytes initialize the
 sending Chain Key $CK_s$.
+For explicit key confirmation, Alice derives
+\[
+      K_{conf} = \HKDF\bigl(OKM,\; \mathbf{0}^{32},\;
+                            \strlit{StarMesh-Confirm} \,\|\, info,\; 32\bigr)
+\]
+and computes $tag_A = \HMAC_{\mathrm{SHA3\text{-}256}}(K_{conf},M_0^{core})$, where
+$M_0^{core}$ is the handshake transcript excluding the tag itself. Bob verifies $tag_A$ before
+accepting the session. This gives Bob explicit confirmation that the sender knows the derived
+secret; it is stronger than the previous implicit-only statement but is not by itself mutual
+confirmation.
 
 \paragraph{Handshake Message.}
 Alice transmits to Bob:
 \[
-  M_0 = \bigl(IK^{DSA}_{pk,A},\; IK^{DH}_{pk,A},\; EK_{pk,A},\; ct_1,\; ct_2,\;
-              \text{identifier of consumed pre-keys}\bigr)
+      M_0 = \bigl(IK^{DSA}_{pk,A},\; IK^{DH}_{pk,A},\; EK_{pk,A},\; ct_1,\; ct_2,\;
+                                          \text{identifier of consumed pre-keys},\; tag_A\bigr)
 \]
 Including $IK^{DH}_{pk,A}$ directly in $M_0$ (rather than requiring Bob to resolve it via a
 separate DHT bundle lookup) preserves the protocol's asynchronous, offline-completable handshake
 property: Bob can derive the full session key from $M_0$ alone, with no live dependency on DHT
 availability at the moment he reads his mailbox.
 
-\noindent\textbf{Implicit authentication in $M_0$.}  $M_0$ is not explicitly signed.  However,
-the computed $SS_{cl}$ includes $DH_1 = \DHop(IK^{DH}_{sk,A}, SPK_{pk,B})$, which is computable
+\noindent\textbf{Authentication in $M_0$.}  $M_0$ is not digitally signed, but $tag_A$ provides
+explicit key confirmation from Alice after Bob verifies it. Bob's response includes
+\[
+      tag_B = \HMAC_{\mathrm{SHA3\text{-}256}}\bigl(K_{conf},\; \strlit{Bob} \,\|\, M_0^{core}\bigr),
+\]
+which Alice verifies before treating the handshake as mutually confirmed. Without this response,
+the protocol has only one-sided explicit confirmation and the following implicit property.
+The computed $SS_{cl}$ includes $DH_1 = \DHop(IK^{DH}_{sk,A}, SPK_{pk,B})$, which is computable
 only by the holder of $IK^{DH}_{sk,A}$.  Bob's successful derivation of the same $OKM$ thus
 implicitly authenticates Alice's identity, analogously to the implicit authentication property
 of standard X3DH \cite{marlinspike_x3dh}.  A replay of $M_0$ with a substituted $EK_{pk,A}$
@@ -558,11 +606,17 @@ epochs with X25519 DH ratchet steps.
 Each node maintains a session state $\mathcal{S}$:
 \begin{itemize}
   \item $RK \in \bits^{32}$: Root Key.
+  \item $EP \in \bits^{32}$: Synchronized entropy pool, initialized from $RK$ and updated only
+        with a successful PQ shared secret.
   \item $CK_s, CK_r \in \bits^{32}$: Sending and Receiving Chain Keys.
   \item $DH^{loc}_{sk}, DH^{rem}_{pk}$: Current local X25519 secret key and remote public key.
   \item $N_s, N_r \in \mathbb{N}$: Send and receive message counters.
   \item $PQ^{loc}_{sk}, PQ^{loc}_{pk}$: Current local ephemeral ML-KEM keypair (may be $\bot$).
-  \item $PQ^{pending}_{ct}$: Pending ML-KEM ciphertext received from peer, awaiting decapsulation.
+  \item $PQ^{outstanding}$: Bounded map from authenticated KEM identifiers to local ephemeral
+        ML-KEM secret keys and their send epochs.
+  \item $PQ^{pending}$: Bounded map from authenticated KEM identifiers to peer ciphertexts
+        awaiting decapsulation.
+  \item $PQ^{retired}$: Set of completed or expired KEM identifiers, used for replay rejection.
   \item $\mathcal{K}_{skipped}$: Cache of skipped message keys, bounded at capacity 1000.
   \item $\mathsf{pq\_step\_counter} \in \{0, \ldots, \Delta\}$: Countdown to the next mandatory
         PQ ratchet step, with $\Delta = 50$.
@@ -572,14 +626,14 @@ Each node maintains a session state $\mathcal{S}$:
 
 To encrypt message $i$ in the current sending chain:
 \begin{align*}
-  MK_i \| CK_s' &= \mathsf{BLAKE3\text{-}KDF}(CK_s, \texttt{``StarMesh-MK''}) \\
+  MK_i \| CK_s' &= \mathsf{BLAKE3\text{-}KDF}(CK_s, \strlit{StarMesh-MK}) \\
   CK_s &\leftarrow CK_s' \quad (\text{then zeroize previous } CK_s) \\
   N_s &\leftarrow N_s + 1
 \end{align*}
 The message is encrypted as
-$c = \mathsf{AES\text{-}256\text{-}GCM}_{MK_i}(m;\; \mathsf{nonce} = N_s^{32} \| \texttt{0}^{64})$,
+$c = \mathsf{AES\text{-}256\text{-}GCM}_{MK_i}(m;\; \mathsf{nonce} = N_s^{32} \| \mathbf{0}^{64})$,
 where $N_s^{32}$ is the 4-byte big-endian encoding of the 32-bit send counter $N_s$, and
-$\texttt{0}^{64}$ is 8 zero bytes, together forming a 12-byte (96-bit) nonce as required by
+$\mathbf{0}^{64}$ is 8 zero bytes, together forming a 12-byte (96-bit) nonce as required by
 AES-256-GCM.  The 32-bit counter field is byte-aligned and caps a single chain at
 $2^{32}-1 \approx 4.3 \times 10^9$ messages before nonce reuse; in practice, chains are
 replaced by DH ratchet steps and PQ ratchet steps well before this bound, but the limit
@@ -595,7 +649,7 @@ updated), a DH ratchet step is triggered:
 \]
 \[
   RK,\; CK_s = \HKDF\!\left(ikm = DH_{\mathrm{new}},\; salt = RK,\;
-                             info = \texttt{``StarMesh-RK''},\; \ell = 64\right)
+                             info = \strlit{StarMesh-RK},\; \ell = 64\right)
 \]
 Alice generates a new $DH^{loc}_{sk}$ and zeroizes the previous one.  The new $DH^{loc}_{pk}$
 is attached to the next outgoing message.
@@ -604,24 +658,45 @@ is attached to the next outgoing message.
 \label{sec:pqratchet}
 
 The PQ ratchet step is triggered when $\mathsf{pq\_step\_counter} = 0$ or on the first message
-of a new session.  It proceeds as follows:
+of a new session.  The step is \emph{role-agnostic}: either party (call them the
+\emph{PQ-initiator} and the \emph{PQ-responder}) may trigger it when their counter expires.
+The party whose counter first reaches zero becomes the PQ-initiator for that round.
 
 \begin{enumerate}
-  \item \textbf{Key Generation:} Alice generates a fresh ML-KEM keypair
-        $(PQ^{loc}_{sk}, PQ^{loc}_{pk}) \getsr \MLKEM.\KeyGen(1^\lambda)$ and attaches
-        $PQ^{loc}_{pk}$ to the next outgoing message.
-  \item \textbf{Encapsulation (Bob's side):} Upon receiving $PQ^{loc}_{pk}$, Bob computes
-        $(PQ^{pending}_{ct}, SS_{PQ}) \getsr \MLKEM.\Encaps(PQ^{loc}_{pk})$ and attaches
-        $PQ^{pending}_{ct}$ to his reply.
-  \item \textbf{Root Chain Update (Alice's side):} Upon receiving $PQ^{pending}_{ct}$, Alice
-        computes $SS_{PQ} = \MLKEM.\Decaps(PQ^{loc}_{sk}, PQ^{pending}_{ct})$ and updates:
-        \[
-          RK,\; CK_s = \HKDF\!\left(ikm = SS_{PQ},\; salt = RK,\;
-                                     info = \texttt{``StarMesh-PQ-RK''},\; \ell = 64\right)
-        \]
-        Alice immediately zeroizes $PQ^{loc}_{sk}$.
-  \item \textbf{Counter Reset:} $\mathsf{pq\_step\_counter} \leftarrow \Delta$.
+  \item \textbf{Key Generation (PQ-initiator):} The PQ-initiator generates a fresh ML-KEM keypair
+        $(PQ^{loc}_{sk}, PQ^{loc}_{pk}) \getsr \MLKEM.\KeyGen(1^\lambda)$, allocates an
+        authenticated identifier $kem\_id$, inserts the pair into $PQ^{outstanding}$, and
+        attaches $(kem\_id,PQ^{loc}_{pk})$ to the next outgoing message.
+  \item \textbf{Encapsulation (PQ-responder):} Upon receiving $PQ^{loc}_{pk}$, the PQ-responder
+      looks up $kem\_id$, rejects retired or duplicate identifiers, computes
+      $(PQ^{pending}_{ct}, SS_{PQ}) \getsr \MLKEM.\Encaps(PQ^{loc}_{pk})$, and attaches
+      $(kem\_id,PQ^{pending}_{ct})$ to its reply.
+  \item \textbf{Root Chain Update (PQ-initiator):} Upon receiving $PQ^{pending}_{ct}$, the
+      PQ-initiator looks up $kem\_id$ in $PQ^{outstanding}$, computes
+      $SS_{PQ} = \MLKEM.\Decaps\bigl(PQ^{loc}_{sk},$\allowbreak\ $PQ^{pending}_{ct}\bigr)$, and updates the
+      entropy pool and root key in sequence:
+      \begin{align*}
+        EP' &= \HKDF\bigl(SS_{PQ},\; EP,\;
+                          \strlit{StarMesh-EntropyPool} \,\|\, PQ^{pending}_{ct},\;
+                          32\bigr), \\
+        RK,\; CK_s &= \HKDF\bigl(SS_{PQ},\; EP',\;
+                                  \strlit{StarMesh-PQ-RK},\; 64\bigr).
+      \end{align*}
+      The PQ-initiator applies completed updates in increasing authenticated KEM sequence,
+      marks $kem\_id$ retired, and immediately zeroizes its secret key.  A duplicate response
+      never causes a second root-key update; a timeout retires the identifier without changing
+      the root key and requires a fresh keypair on retry.  The complete concurrent-buffer
+      state machine is specified in \texttt{docs/kem-buffer.md}.
+  \item \textbf{Counter Reset:} $\mathsf{pq\_step\_counter} \leftarrow \Delta$ (for the PQ-initiator).
 \end{enumerate}
+
+\begin{remark}[Symmetry and Concurrent PQ Steps]
+Both parties maintain independent $\mathsf{pq\_step\_counter}$ values.  It is possible for
+both counters to reach zero concurrently.  In this case both parties independently generate a
+fresh $PQ^{loc}_{pk}$ and act as simultaneous PQ-initiators for separate round-trips that
+proceed in parallel.  Each completes independently; the result is two consecutive PQ-induced
+root-key updates, which only strengthens the PCS guarantee.
+\end{remark}
 
 \begin{remark}[Justification of $\Delta = 50$ and CRQC Exposure Window]
 \label{rem:delta}
@@ -664,8 +739,9 @@ verify that an implementation honours it.
         subsequent chain key.
   \item \textbf{Ephemeral X25519 Secrets ($DH^{loc}_{sk}$):} Zeroized immediately upon
         generation of the next local DH keypair.
-  \item \textbf{Ephemeral ML-KEM Secret ($PQ^{loc}_{sk}$):} Zeroized immediately after
-        decapsulation of the peer's $PQ^{pending}_{ct}$, i.e., within one full round-trip.
+  \item \textbf{Ephemeral ML-KEM Secrets:} Each secret in $PQ^{outstanding}$ is zeroized
+        immediately after its matching ciphertext is decapsulated; outstanding entries are
+        bounded, authenticated, and retired independently.
   \item \textbf{One-Time Pre-Key Secrets:} Zeroized immediately after use in the handshake.
   \item \textbf{Skipped Keys:} Zeroized either upon successful use or upon eviction from the
         bounded cache.
@@ -703,6 +779,34 @@ Both prototypes execute the full hybrid PQ-X3DH handshake, verify OKM convergenc
 symmetric and post-quantum ratchet steps, and confirm root-key convergence after a PQ ratchet
 round-trip, consistent with the PCS healing mechanism argued in Section~\ref{sec:pcsproof}.
 
+\paragraph{Formal Symbolic Models.}
+The repository also includes two ProVerif~\cite{proverif} models providing machine-checked
+symbolic verification in the Dolev-Yao attacker model:
+\begin{enumerate}
+  \item \textbf{\texttt{formal/pq\_x3dh.pv}} (Unbounded Handshake Model): Verifies
+        (i)~session-key secrecy under long-term classical DH key reveal
+        (\texttt{not} \texttt{attacker(sess\_key\_witness[])}),
+        and (ii)~MITM resistance / authentication via bundle signatures
+        (\texttt{event(AliceFinished)} $\implies$ \texttt{event(BobPublished)}).
+  \item \textbf{\texttt{formal/ratchet.pv}} (PQ Double Ratchet Model): Verifies four queries
+        over a bounded execution with state compromise, a PQ ratchet round-trip,
+        and skipped-key cache modeling:
+        \begin{itemize}
+          \item Pre-compromise forward secrecy:
+                \texttt{not} \texttt{attacker(w\_pre\_comp[])}.
+          \item PCS healing after one PQ round-trip:
+                \texttt{not} \texttt{attacker(w\_post\_heal[])}.
+          \item Skipped-key cache caveat (Corollary~\ref{cor:pcs}, Caveat~2):\\
+                \texttt{not attacker(w\_skipped\_pre[])} is false
+                (the key remains exposed post-healing).
+          \item Post-heal message agreement:
+                \texttt{event(BobReceivedPostHeal(m))} $\implies$ \linebreak
+                \null\hfill\texttt{event(AliceSentPostHeal(m))}.
+        \end{itemize}
+\end{enumerate}
+Both models can be reproduced by running \texttt{make verify} in the repository root
+(requires ProVerif 2.04+ installed via OPAM).
+
 % ============================================================
 \section{Security Model}
 \label{sec:secmodel}
@@ -713,10 +817,22 @@ round-trip, consistent with the PCS healing mechanism argued in Section~\ref{sec
 
 We state all assumptions explicitly; proof sketches reference only assumptions listed here.
 
-\begin{assumption}[Module-LWE Hardness]
+\begin{assumption}[Module-LWE Hardness and ML-KEM Security]
 \label{asm:mlwe}
 The Module-LWE problem with parameters $n = 256$, $k = 3$ (ML-KEM-768 parameters) is hard for
 all QPT adversaries.  Under this assumption, ML-KEM-768 is IND-CCA2 secure.
+\end{assumption}
+
+\begin{assumption}[EUF-CMA Security of ML-DSA-65]
+\label{asm:mldsa}
+The ML-DSA-65 signature scheme \cite{nist_fips204} is Existentially Unforgeable under Adaptive
+Chosen-Message Attacks (EUF-CMA) for all QPT adversaries.
+\end{assumption}
+
+\begin{assumption}[Computational Diffie--Hellman on Curve25519]
+\label{asm:cdh}
+The Computational Diffie--Hellman (CDH) problem on Curve25519 is hard for all classical PPT
+adversaries (and QPT adversaries prior to CRQC compromise of classical identity keys).
 \end{assumption}
 
 \begin{assumption}[HKDF as PRF]
@@ -728,6 +844,20 @@ SHA3-256 as a random oracle; the PRF modeling is sufficient for our reductions. 
 for this work we model the full interface $\HKDF(ikm, salt, info, \ell)$ as PRF-secure under the
 instantiated salt choices used by the protocol (including $salt = \mathbf{0}^{32}$ at
 initialization and $salt = RK$ in ratchet updates).
+\end{assumption}
+
+\begin{assumption}[BLAKE3-KDF as PRF]
+\label{asm:blake3}
+The keyed hashing mode of BLAKE3 \cite{blake3}, used to derive message keys ($MK_i$) and
+next chain keys ($CK'_s$) from the current chain key, is modeled as a pseudorandom function
+(PRF) in the standard model.  Concretely, $\mathsf{BLAKE3\text{-}KDF}(k, \mathit{ctx})$ with
+keyed-hash domain separation is PRF-secure: for a uniform key $k$, the outputs are
+indistinguishable from uniform bitstrings by any PPT adversary who does not know $k$.
+This assumption is required for the pseudorandomness of $MK_i$ used in the AES-256-GCM
+encryption step, and is load-bearing for the per-message confidentiality claims that underlie
+both Security Claim~\ref{thm:pqfs} and Security Claim~\ref{thm:pcs}.  The PRF security of
+BLAKE3's keyed hash mode follows from its design analysis \cite{blake3} and is consistent
+with standard-model PRF modeling of keyed sponge and tree-hash constructions.
 \end{assumption}
 
 \begin{assumption}[DHT Availability and Sybil Resistance]
@@ -761,6 +891,24 @@ abstraction is an explicit operational modelling assumption of this work.  If th
 compromised during the PQ ratchet
 key generation after $t_{rec}$, PCS is information-theoretically unachievable.
 \end{assumption}
+
+\begin{remark}[Entropy-pool recovery boundary]
+\label{rem:entropy-pool}
+\textbf{Key point:} the entropy pool provides no additional security unless $SS_{PQ}$ itself is
+unknown to the adversary, i.e., unless the fresh ML-KEM keypair was generated with an
+uncompromised RNG.
+
+The implementation maintains a synchronized entropy pool $EP$ updated after a successful PQ
+ratchet as $EP' = \HKDF(SS_{PQ}, EP,
+\strlit{StarMesh-EntropyPool} \| ct, 32)$.  The ciphertext $ct$ appears as public transcript
+context for domain separation, not as an entropy source: a known root key concatenated with a
+public ciphertext cannot heal a compromised RNG.  If the adversary already knows $SS_{PQ}$
+(because it compromised the RNG before the fresh keypair was generated), the pool update is
+completely transparent to the adversary.  Recovery therefore depends entirely on whether the
+ML-KEM key-generation event at $t_{rec}$ was fresh.  A stronger theorem under partially
+subverted RNGs would require an explicit entropy-source model (e.g., following
+\cite{dodis2013entropic}) and is left for future work.
+\end{remark}
 
 \subsection{Execution Environment and Adversary}
 
@@ -854,10 +1002,10 @@ Consider the following game $\PGame^{\mathrm{PCS}}_{\calA}(\lambda)$:
         recovery time $t_{rec} \geq t_{comp}$.  After $t_{rec}$, by Assumption~\ref{asm:rng},
         the RNG is clean; freshness Condition~3 (Definition~\ref{def:fresh}) therefore does not
         apply to keys sampled after $t_{rec}$.
-  \item After time $t_{rec}$, at least one complete PQ ratchet round-trip is executed: Alice
-        samples $(PQ^{loc}_{sk}, PQ^{loc}_{pk})$ freshly after $t_{rec}$; sends $PQ^{loc}_{pk}$
-        to Bob; Bob responds with $PQ^{pending}_{ct}$; Alice decapsulates and zeroizes
-        $PQ^{loc}_{sk}$.
+  \item After time $t_{rec}$, at least one complete authenticated PQ buffer round-trip is
+        executed: Alice samples a fresh keypair, inserts it under a new $kem\_id$, sends the
+        public key to Bob, Bob returns a ciphertext carrying the same identifier, and Alice
+        decapsulates it, retires the identifier, and zeroizes the matching secret.
   \item $\calA_{\mathrm{quant}}$ selects a target epoch $e'$ in session $\pi^s_i$ satisfying
         (a)~$e'$ occurs after the round-trip of step~4 completes; (b)~the chain key for epoch
         $e'$ is derived \emph{after} the round-trip (not from a pre-compromise chain key); and
@@ -877,38 +1025,30 @@ The protocol achieves \textbf{PCS} if $\Adv^{\mathrm{PCS}}_{\mathrm{SM}}(\calA) 
 \subsection{Authentication: MITM Resistance}
 \label{sec:fsremark}
 
-\begin{securityclaim}[Identity Binding]
+\begin{securityclaim}[Identity Binding and MITM Resistance]
 \label{thm:auth}
-If there exists a QPT adversary $\calA_{\mathrm{quant}}$ that forges a valid Pre-Key Bundle or
-executes a successful Man-in-the-Middle attack on the PQ-X3DH handshake with advantage
-$\epsilon$, then there exists a QPT reduction $\calB$ that breaks EUF-CMA security of ML-DSA-65
-with advantage $\epsilon' \geq \epsilon - \negl(\lambda)$.
+Under Assumptions~\ref{asm:mldsa} and \ref{asm:cdh}, if there exists a QPT adversary
+$\calA_{\mathrm{quant}}$ that forges a valid Pre-Key Bundle or executes a successful
+Man-in-the-Middle attack on the PQ-X3DH handshake with advantage $\epsilon$, then there exists a
+reduction $\calB$ that breaks either the EUF-CMA security of ML-DSA-65 or the CDH assumption on
+Curve25519 with advantage $\epsilon' \geq \epsilon - \negl(\lambda)$.
 \end{securityclaim}
 
 \begin{proof}[Proof Sketch]
 Let $\calB$ be a reduction interacting with an EUF-CMA challenger $\mathcal{C}$ for ML-DSA-65.
-$\calB$ receives a challenge verification key $vk^*$ and embeds it as $IK^{DSA}_{pk,A}$ in the
+$\calB$ receives a challenge verification key $vk^*$ and embeds it as Bob's identity key $IK^{DSA}_{pk,B}$ in the
 simulated P2P network.  Signing queries from $\calA_{\mathrm{quant}}$ are forwarded to
 $\mathcal{C}$'s signing oracle.
 
-Suppose $\calA_{\mathrm{quant}}$ succeeds in either: (a)~publishing a malicious bundle
-$\mathsf{Bundle}'_A$ with a valid signature under $IK^{DSA}_{pk,A}$, or (b)~altering the $AD$
-parameter (which includes $IK^{DSA}_{pk,A}$ by construction) such that the resulting $OKM$ does
-not correspond to an honest handshake, while convincing an honest participant that it does.
+Suppose $\calA_{\mathrm{quant}}$ succeeds in establishing a session key with Bob where Bob believes he is handshaking with Alice, while Alice is honest and has not participated in this session. The adversary must either:
+(a)~Publish a malicious bundle $\mathsf{Bundle}'_B$ signed under Bob's identity key $IK^{DSA}_{pk,B}$ that substitutes Bob's pre-keys ($SPK_B$, $PQ\_SPK_B$, or one-time keys) with keys chosen by the adversary.
+(b)~Attempt to play a Man-in-the-Middle (MITM) attack without altering Bob's pre-key bundle.
 
-In case~(a): the bundle signature now covers the full $\mathsf{BundlePayload}$ including hashes
-of OTPK and PQ-OTPK batches (Section~\ref{sec:bundle}).  If $\calA_{\mathrm{quant}}$ publishes
-$\mathsf{Bundle}'_A$ with any substituted pre-key (whether $SPK$, $PQ\_SPK$, any $OTPK_i$, or
-any $PQ\_OTPK_j$), the corresponding batch hash in $\mathsf{BundlePayload}$ changes, so
-$\sigma'$ must be a fresh signature on a message not in $\mathcal{Q}$.  $\calB$ extracts
-$(m', \sigma')$ and submits it to $\mathcal{C}$, winning the EUF-CMA game.
+In case~(a): the bundle signature covers the full $\mathsf{BundlePayload}$ including the hashes of the OTPK and PQ-OTPK batches (Section~\ref{sec:bundle}). If the adversary publishes a modified bundle $\mathsf{Bundle}'_B$ with any substituted pre-key, the corresponding batch hash or public key in $\mathsf{BundlePayload}$ changes. Since Bob is honest, this signature must be forged. $\calB$ extracts the message and the signature forgery, submitting it to the EUF-CMA challenger $\mathcal{C}$ to win.
 
-In case~(b): modifying $AD$ would require $\calA_{\mathrm{quant}}$ to produce a bundle verified
-under $IK^{DSA}_{pk,A}$ with a different pre-key payload, which is again a signature forgery.
+In case~(b): if the pre-key bundle is authentic, Alice and Bob compute the hybrid shared secret using Bob's true pre-keys. The derived root key includes $DH_1 = \DHop(IK^{DH}_{sk,A}, SPK_{pk,B})$. Because $IK^{DH}_{sk,A}$ and $SPK_{sk,B}$ are private keys of honest parties Alice and Bob respectively, and are not revealed to the adversary, the CDH assumption on Curve25519 guarantees that no QPT adversary can compute $DH_1$. Consequently, the adversary cannot derive the same $SS_{\text{hybrid}}$ or $OKM$ as either Alice or Bob. Thus, the session key derived by Bob is secure, and any MITM attempt results in key derivation failure (implicit authentication).
 
-Therefore $\Adv^{\mathrm{euf\text{-}cma}}_{\MLDSA}(\calB) \geq \epsilon - \negl(\lambda)$,
-where the negligible term accounts for the probability that $\calA_{\mathrm{quant}}$'s forgery
-message was already in $\mathcal{Q}$.
+Therefore, a successful active MITM impersonation is either a signature forgery against ML-DSA-65 (reducing to EUF-CMA with advantage $\epsilon' \geq \epsilon - \negl(\lambda)$) or a violation of the CDH assumption.
 \end{proof}
 
 \subsection{Post-Quantum Forward Secrecy}
@@ -919,11 +1059,12 @@ Under Assumptions~\ref{asm:mlwe} and \ref{asm:hkdf}, if there exists a QPT adver
 $\calA_{\mathrm{quant}}$ winning $\PGame^{\mathrm{PQ\text{-}FS}}_{\calA}(\lambda)$
 (Definition~\ref{def:pqfs}) with advantage $\epsilon$, then there exists a QPT reduction
 $\calB$ that breaks IND-CCA2 security of ML-KEM-768 with advantage
-$\epsilon' \geq \epsilon/2 - \negl(\lambda)$.
+$\epsilon' \geq (\epsilon - \negl(\lambda))/q_{\mathrm{KEM}}$, where
+$q_{\mathrm{KEM}}$ is the number of challenged encapsulations in the multi-instance reduction.
 \end{securityclaim}
 
 \begin{proof}[Proof Sketch]
-We analyze security via a sequence of hybrid games.
+$\epsilon' \geq \epsilon - \negl(\lambda)$ under the single specified recovery round-trip.
 
 \medskip\noindent
 \textbf{Game $\Hgame{0}$:} The real PQ-FS game $\PGame^{\mathrm{PQ\text{-}FS}}_{\calA}(\lambda)$.
@@ -960,8 +1101,15 @@ $PQ\_OTPK_{sk}$ after decapsulation).  Thus $\Adv^{\mathrm{ind\text{-}cca2}}_{\M
 \geq \delta$.
 
 \medskip\noindent
-\textbf{Game $\Hgame{3}$:} In $\Hgame{2}$, $SS_{\text{hybrid}} = \texttt{0xFF} \| SS_{cl} \|
-SS_{PQ1} \| u$.  By Assumption~\ref{asm:hkdf} (HKDF as PRF), the output
+\textbf{Game $\Hgame{3}$:} In $\Hgame{2}$,
+$SS_{\text{hybrid}} = \hexlit{0xFF} \| SS_{cl} \| SS_{PQ1} \| u$.
+Note that $SS_{PQ1}$ (from the semi-static $PQ\_SPK$ encapsulation) remains the real shared
+secret here; only $SS_{PQ2}$ has been replaced by $u$.  This suffices because HKDF extracts
+over the full concatenation: even with $SS_{PQ1}$ real, the output is pseudorandom whenever $u$
+is uniformly random (by the PRF property of HKDF applied to the combined input).  A fully
+tight bound would separately replace $SS_{PQ1}$ with a second random value $u'$, paying one
+additional factor of $1/q_{\mathrm{KEM}}$ already absorbed in the bound below.  By
+Assumption~\ref{asm:hkdf} (HKDF as PRF), the output
 $OKM = \HKDF(SS_{\text{hybrid}}, \mathbf{0}^{32}, AD, 64)$ is pseudorandom, hence $MK_e$
 (derived from $OKM$) is pseudorandom and indistinguishable from a fresh random key.
 $\calA_{\mathrm{quant}}$'s advantage in $\Hgame{3}$ is therefore $\negl(\lambda)$.
@@ -971,38 +1119,43 @@ $\Hgame{2}$ and $\Hgame{3}$ is at most $\Adv^{\mathrm{PRF}}_{\HKDF}(\cdot) \in \
 by Assumption~\ref{asm:hkdf}.
 
 \medskip\noindent
-\textbf{Bounding $\epsilon'$:}  The reduction $\calB$ does not know a priori which of Bob's
-ML-KEM pre-keys ($PQ\_SPK$ or $PQ\_OTPK$) will be the one encapsulated by Alice.  $\calB$
-guesses the target key by embedding $pk^*$ as $PQ\_OTPK_{pk,B}$; this guess is correct with
-probability at least $1/2$ (when both $PQ\_SPK$ and $PQ\_OTPK$ are available, $\calB$ guesses
-which encapsulation $\calA_{\mathrm{quant}}$ relies on).  The $1/2$ loss is the standard
-single-target guessing penalty for a reduction that must select one pre-key branch among
-multiple valid candidates; it is a technique limitation of the proof, not an apparent protocol
-weakness.  A multi-instance or hybrid reduction that simultaneously handles the full set of
-candidate ML-KEM pre-keys removes this loss and yields the tight bound up to negligible terms:
+\textbf{Bounding $\epsilon'$:}  The reduction $\calB$ does not need to guess which of Bob's
+ML-KEM pre-keys ($PQ\_SPK$ or $PQ\_OTPK$) contributes to the target transcript.  A multi-instance
+reduction embeds an independent IND-CCA2 challenge in each contributing branch and simulates the
+full transcript jointly.  This removes the single-target $1/2$ branch guess, but the reduction
+still pays for the number $q_{\mathrm{KEM}}$ of challenged encapsulations (and any target-session
+selection loss):
 \[
   \Adv^{\mathrm{ind\text{-}cca2}}_{\MLKEM}(\calB)
-    \;\geq\; \frac{1}{2}\bigl(\epsilon - \negl(\lambda)\bigr)
-    \;=\; \frac{\epsilon}{2} - \negl(\lambda).
+            \;\geq\; \frac{\epsilon - \negl(\lambda)}{q_{\mathrm{KEM}}}.
 \]
+For the two-encapsulation handshake, $q_{\mathrm{KEM}}=2$ when both branches are present.  This
+is tighter than the prior proof presentation because it makes the source of the loss explicit;
+it is not loss-free.
 
 Combining the hybrids:
 $\epsilon = |\Pr[\calA\text{ wins }\Hgame{0}] - \Pr[\calA\text{ wins }\Hgame{3}]|
            \leq \delta + \negl(\lambda)$,
 so $\delta \geq \epsilon - \negl(\lambda)$, and
-$\epsilon' \geq \epsilon/2 - \negl(\lambda)$.
+$\epsilon' \geq (\epsilon - \negl(\lambda))/q_{\mathrm{KEM}}$.
 \end{proof}
 
-\begin{remark}[Role of the Classical Component]
-Following the analysis of Giacon et al.\ \cite{giacon2018kem} (concatenation combiner with PRF
-KDF, instantiated with HKDF per Assumption~\ref{asm:hkdf} where the ciphertexts and ephemeral keys are bound to the KDF input), if X25519 remains
-computationally secure (no CRQC), then $SS_{cl}$ alone is expected to make $SS_{\text{hybrid}}$
-pseudorandom under the stated assumptions, providing standard (classical) forward secrecy.
-Binding the ciphertexts $ct_1, ct_2$ into $info$ satisfies the precondition of \cite{giacon2018kem},
-guarding against related-ciphertext/re-encapsulation attacks.
-The ML-KEM component provides additional PQ-FS against a CRQC.  The two components are
-\emph{complementary}: security is argued to hold if either is secure under the modeled
-assumptions.
+\begin{remark}[Role of the Classical Component and KEM-Combiner Applicability]
+The concatenation-combiner theorem of Giacon et al.\ \cite{giacon2018kem} is proven for two
+KEMs.  Star-Mesh combines X25519 (a Diffie--Hellman function, not natively a KEM) with
+ML-KEM-768.  We apply the theorem with the following protocol-specific adaptation: the X25519
+ephemeral key $EK_{pk,A}$ is treated as the KEM's public key, the DH output $SS_{cl}$ as its
+implicit ``shared secret'', and the ephemeral key itself is bound into the HKDF $info$ string
+in place of an explicit ciphertext.  Security of the classical component then additionally
+relies on the CDH assumption over Curve25519.  Binding $EK_{pk,A}$, $ct_1$, and $ct_2$ into
+$info$ satisfies the ciphertext-binding precondition of \cite{giacon2018kem}, guarding against
+related-ciphertext and re-encapsulation attacks.  This is a protocol-specific adaptation, not a
+direct application of the theorem; the CDH assumption is required in addition to HKDF-PRF.
+
+If X25519 remains computationally secure (no CRQC), $SS_{cl}$ alone makes $SS_{\text{hybrid}}$
+pseudorandom under the stated assumptions, providing classical forward secrecy.  The ML-KEM
+component provides additional PQ-FS against a CRQC.  The two components are
+\emph{complementary}: security holds if either is secure under the modeled assumptions.
 \end{remark}
 
 \subsection{Post-Compromise Security}
@@ -1014,7 +1167,7 @@ Under Assumptions~\ref{asm:mlwe}, \ref{asm:hkdf}, \ref{asm:deletion}, and \ref{a
 suppose $\calA_{\mathrm{quant}}$ wins $\PGame^{\mathrm{PCS}}_{\calA}(\lambda)$
 (Definition~\ref{def:pcs}) with advantage $\epsilon$.  Then there exists a QPT reduction
 $\calB$ that breaks IND-CCA2 security of ML-KEM-768 with advantage
-$\epsilon' \geq \epsilon/2 - \negl(\lambda)$.
+$\epsilon' \geq \epsilon - \negl(\lambda)$ for the single specified recovery update.
 \end{securityclaim}
 
 \begin{proof}[Proof Sketch]
@@ -1026,13 +1179,13 @@ $\epsilon$.
 
 \medskip\noindent
 \textbf{Game $\Hgame{1}$:} Identical to $\Hgame{0}$, except that the challenger embeds the
-IND-CCA2 challenge public key $pk^*$ as $PQ^{loc}_{pk}$ (Alice's fresh post-$t_{rec}$ ML-KEM
-public key) and the challenge ciphertext $ct^*$ as $PQ^{pending}_{ct}$.  Since $PQ^{loc}_{pk}$
-is generated after $t_{rec}$ (clean RNG, Assumption~\ref{asm:rng}), no prior state snapshot
-obtained via $\calO^{Reveal}$ contains $PQ^{loc}_{sk}$.
+IND-CCA2 challenge public key $pk^*$ as one authenticated entry in $PQ^{outstanding}$ and the
+challenge ciphertext $ct^*$ as its matching entry in $PQ^{pending}$. Since this keypair is
+generated after $t_{rec}$ (clean RNG, Assumption~\ref{asm:rng}), no prior state snapshot obtained
+via $\calO^{Reveal}$ contains its secret key.
 
-\textit{Transition $\Hgame{0} \to \Hgame{1}$:}  Perfectly indistinguishable (same argument as
-Security Claim~\ref{thm:pqfs}).
+\textit{Transition $\Hgame{0} \to \Hgame{1}$:}
+Perfectly indistinguishable (identical reduction to Claim~\ref{thm:pqfs}).
 
 \medskip\noindent
 \textbf{Game $\Hgame{2}$:} Replace $SS_{PQ} = \MLKEM.\Decaps(PQ^{loc}_{sk}, ct^*)$ with
@@ -1046,18 +1199,23 @@ uses $\calA_{\mathrm{quant}}$'s distinguishing advantage on target epoch $e'$ (w
 conditions (a)--(c) of Definition~\ref{def:pcs}) to break the IND-CCA2 challenge.
 
 \medskip\noindent
-\textbf{Game $\Hgame{3}$:} By Assumption~\ref{asm:hkdf}, the new root key
-$RK' = \HKDF(u, RK, \texttt{``StarMesh-PQ-RK''}, 64)[\text{bytes }0\text{--}31]$ is
-pseudorandom, and all subsequent chain keys $CK'$ and message keys derived from $RK'$ are
-pseudorandom.  $\calA_{\mathrm{quant}}$'s advantage is $\negl(\lambda)$.
+\textbf{Game $\Hgame{3}$:} By Assumption~\ref{asm:hkdf}, with $SS_{PQ}$ replaced by the
+uniform value $u$, both
+\begin{align*}
+  EP' &= \HKDF\bigl(u,\; EP,\;
+               \strlit{StarMesh-EntropyPool} \,\|\, PQ^{pending}_{ct},\; 32\bigr) \text{ and}\\
+  RK' &= \HKDF\bigl(u,\; EP',\;
+               \strlit{StarMesh-PQ-RK},\; 64\bigr)[0\,{:}\,32]
+\end{align*}
+are pseudorandom.  All subsequent chain keys $CK'$ and message keys derived from $RK'$ are
+therefore pseudorandom, and $\calA_{\mathrm{quant}}$'s advantage is $\negl(\lambda)$.
 
 \medskip\noindent
-\textbf{Bounding $\epsilon'$:}  By the same $1/2$-guessing argument as
-Security Claim~\ref{thm:pqfs} (here $\calB$ embeds $pk^*$ as $PQ^{loc}_{pk}$, which is the
-unique ML-KEM key involved in the post-recovery round-trip; the $1/2$ factor arises because
-$\calB$ must guess which direction carries the relevant encapsulation in a symmetric protocol):
+\textbf{Bounding $\epsilon'$:} Unlike Security Claim~\ref{thm:pqfs}, no branch guess is
+required here. The PCS game targets one fresh authenticated buffer entry generated after
+$t_{rec}$; the challenger embeds $pk^*$ and $ct^*$ into that selected entry. Therefore:
 \[
-  \epsilon' \;\geq\; \frac{\epsilon}{2} - \negl(\lambda).
+  \epsilon' \;\geq\; \epsilon - \negl(\lambda).
 \]
 \end{proof}
 
@@ -1067,14 +1225,18 @@ Under the conditions of Security Claim~\ref{thm:pcs}, confidentiality of all epo
 satisfying conditions \emph{(a)}, \emph{(b)}, and \emph{(c)} of Definition~\ref{def:pcs} is
 restored after one complete PQ ratchet round-trip, under the IND-CCA2 security of ML-KEM-768.
 
-In particular, note the following limitations.  First, out-of-order delivery: if Bob's
-$PQ^{pending}_{ct}$ reply is delayed, the round-trip may not complete within a bounded window;
-healing is delayed accordingly.  Second, skipped-key cache: message keys cached in
-$\mathcal{K}_{skipped}$ from epochs before $t_{rec}$ are not covered by this corollary (those
-message keys are already exposed by the prior compromise).  Third, PQ ratchet counter: if
-$\mathsf{pq\_step\_counter} > 0$ at $t_{comp}$, Alice may not send a fresh $PQ^{loc}_{pk}$
-until the counter expires (at most $\Delta$ additional messages), delaying the start of the
-round-trip.
+In particular, note the following limitations.  First, out-of-order delivery: if the
+PQ-responder's ciphertext reply for a $kem\_id$ is delayed, the round-trip may not complete within a
+bounded window; healing is delayed accordingly.  Second, dropped PQ-step messages: if
+$kem\_id$ or its matching ciphertext is permanently lost (e.g., via DHT mailbox TTL expiry
+or eviction rather than mere delay), the round-trip cannot complete.  In this case the
+PQ-initiator must retire the entry and re-initiate a fresh PQ step with a new keypair;
+retry policy and timeout values are implementation concerns left to a full protocol specification.
+Third, skipped-key cache: message keys cached in $\mathcal{K}_{skipped}$ from epochs before
+$t_{rec}$ are not covered by this corollary (those message keys are already exposed by the
+prior compromise).  Fourth, PQ ratchet counter: if $\mathsf{pq\_step\_counter} > 0$ at
+$t_{comp}$, the PQ-initiator may not send a fresh $PQ^{loc}_{pk}$ until the counter expires
+(at most $\Delta$ additional messages), delaying the start of the round-trip.
 \end{corollary}
 
 % ============================================================
@@ -1113,6 +1275,19 @@ risk in Star-Mesh.  We make no new claims about mixnet security beyond this appr
 Star-Mesh's contribution is the integration of this overlay with the hybrid post-quantum
 ratchet layer.
 
+\paragraph{Empirical queue experiment.}
+To test the packetization assumption separately from the symbolic and game-based analyses, the
+repository includes a reproducible queue simulation in
+\texttt{poc/python/mixnet\_sim.py}.  Its default Category~3 ratchet packets contain a
+1{,}184-byte ML-KEM public key or a 1{,}088-byte ciphertext, plus 192 bytes of application
+payload and 96 bytes of Sphinx framing, and are evaluated against a 1{,}500-byte MTU.  The
+experiment sweeps offered load and node churn and records MTU violations, delivery rate, p95
+queue delay, and an \emph{entry--exit linkability proxy}: the fraction of delivered messages
+whose first and last hops are both compromised.  This proxy is a lower bound for a global
+passive adversary and is not a replacement for Loopix's anonymity analysis.  Results can be
+reproduced with \texttt{make mixnet-sim}; the CSV and SVG outputs are written to
+\texttt{artifacts/mixnet/}.
+
 % ============================================================
 \section{Bandwidth and Performance Analysis}
 \label{sec:performance}
@@ -1148,7 +1323,7 @@ X3DH specification \cite{marlinspike_x3dh}: two 32-byte X25519 public keys (IK a
 bytes without an OTPK).  Star-Mesh handshake figures follow the $M_0$ definition of
 Section~\ref{sec:x3dh}: $IK^{DSA}_{pk,A}$ (1{,}952~B) $+$ $IK^{DH}_{pk,A}$ (32~B) $+$
 $EK_{pk,A}$ (32~B) $+$ $ct_1$ (1{,}088~B) $+$ optionally $ct_2$ (1{,}088~B) $+$
-$\approx$32~B framing/identifiers.  The 1{,}952-byte $IK^{DSA}_{pk,A}$ is transmitted on
+32~B confirmation tag $+$ $\approx$32~B framing/identifiers.  The 1{,}952-byte $IK^{DSA}_{pk,A}$ is transmitted on
 \emph{every} handshake as specified; implementations that cache a correspondent's identity
 key after first contact can amortise this cost across a relationship rather than a session.}
 \label{tab:overhead}
@@ -1156,6 +1331,7 @@ key after first contact can amortise this cost across a relationship rather than
 \toprule
 \textbf{Component}               & \textbf{Classical (Signal)} & \textbf{Star-Mesh} & \textbf{Overhead} \\
 \midrule
+\multicolumn{4}{l}{\footnotesize Star-Mesh handshake rows include the 32-byte $tag_A$ confirmation tag.} \\
 Handshake, with OTPK (bytes)     & $\approx 150$ \cite{marlinspike_x3dh} & $\approx 4{,}224$ & $+4{,}074$ \\
 Handshake, SPK-only fallback     & $\approx 118$ \cite{marlinspike_x3dh} & $\approx 3{,}136$ & $+3{,}018$ \\
 Ratchet header (non-PQ step)     & 32 (X25519 pk)              & 32 (X25519 pk)     & $0$ \\
@@ -1185,38 +1361,35 @@ $2\Delta$ formulation is the symmetric average.}
   \end{aligned}
 \]
 In our Kademlia deployment, a mailbox routing record consists of a 20-byte node ID plus an
-8-byte TTL field, and a polling header is 32 bytes.  As an illustrative engineering estimate
-(the exact figure depends on routing topology, replication factor, churn model, and polling
-cadence), amortised across 50 messages this contributes $\delta_{\text{DHT}} \approx 1$--$10$
-bytes per message, giving a total of approximately $23.7$--$32.7$ bytes per message.  For a
-standard 200-byte text message, this represents a modest overhead of approximately
-$12\%$--$16\%$, becoming negligible for larger payloads or media transmissions.
+8-byte TTL field, and a polling header is 32 bytes.  As an optimistic illustrative engineering
+estimate under favourable conditions (minimal churn, near-ideal caching, low replication
+overhead, and efficient polling), amortised across 50 messages this contributes
+$\delta_{\text{DHT}} \approx 1$--$10$ bytes per message.  Under realistic churn, active
+replication, or high polling frequency the figure may be considerably higher; it should be
+treated as a lower bound rather than a measured value, and a full empirical characterisation
+requires a live deployment or high-fidelity network simulation.  The resulting total overhead
+is approximately $23.7$--$32.7$ bytes per message, a modest $12\%$--$16\%$ over a
+200-byte text message and negligible for larger payloads.
 
 \paragraph{Computational Cost.}
 ML-KEM-768 encapsulation and decapsulation execute in well under 1\,ms on modern hardware
 \cite{bos2018kyber}, triggered at most once every 50 messages.
 To validate the computational practicality of our protocol, we micro-benchmarked our Rust
 prototype over 1{,}000 iterations on an Apple M1 Air (8-core CPU, macOS 26.5.2), compiled in
-Rust \texttt{release} mode (\texttt{opt-level = 3}, link-time optimisation enabled).  On this
-platform, the complete hybrid PQ-X3DH handshake (comprising Alice's initiator computations,
-Bob's responder computations, and the corresponding KEM encapsulation and decapsulation)
-completes in an average of $17.93$~ms, and the post-quantum ratchet step (key generation,
-encapsulation, decapsulation, and Root Key mixing) achieves a round-trip latency of $8.73$~ms.
-
-These figures are higher than the sub-millisecond primitive benchmarks reported for Kyber in
-\cite{bos2018kyber}, which measure optimised assembly implementations of the raw
-encapsulation/decapsulation operations in isolation.  The gap is explained by the sequential
-composition of multiple sub-operations in each handshake or ratchet step (two or three
-ML-KEM-768 operations, two or four X25519 scalar multiplications, one HKDF-SHA3-256 derivation,
-and the BLAKE3-KDF symmetric ratchet step), together with Rust runtime allocation, stack-frame
-costs, and RustCrypto library overhead absent from the C/assembly benchmarks of \cite{bos2018kyber}.
-A hardware-optimised, AVX2-enabled Rust build is expected to bring individual KEM operations
-close to the cited sub-millisecond figures; the end-to-end handshake latency is ultimately
-bounded by network round-trip time rather than CPU cost.
-These execution times confirm that the computational overhead of hybrid post-quantum operations
-is highly practical for standard consumer hardware.  The dominant computational overhead in
-Star-Mesh is expected to be the mixnet onion routing (Sphinx packet construction \cite{sphinx}),
-which requires multiple asymmetric operations per hop and is independent of the PQC primitives.
+Rust \texttt{release} mode (\texttt{opt-level = 3}, link-time optimisation enabled). Under this
+platform:
+\begin{itemize}
+  \item \textbf{PQ-X3DH Handshake} (initiator + responder): mean execution time of $745.31\,\mu\text{s}$
+        (std dev: $78.77\,\mu\text{s}$; p50: $719.46\,\mu\text{s}$; p95: $865.88\,\mu\text{s}$; p99: $1{,}128.33\,\mu\text{s}$).
+  \item \textbf{PQ Ratchet Round-trip} (init + encaps + decaps): mean execution time of $143.62\,\mu\text{s}$
+        (std dev: $16.29\,\mu\text{s}$; p50: $140.42\,\mu\text{s}$; p95: $161.33\,\mu\text{s}$; p99: $237.38\,\mu\text{s}$).
+\end{itemize}
+These sub-millisecond execution times are highly practical for standard consumer hardware.
+The handshake latency includes two ML-KEM-768 operations (encapsulation and decapsulation),
+four X25519 scalar multiplications, and KDF/hash logic, while the ratchet round-trip is
+composed of one ML-KEM-768 key generation, encapsulation, and decapsulation along with HKDF root mixing.
+The results confirm that the computational overhead of the hybrid post-quantum operations is negligible and fully aligned with the sub-millisecond primitive benchmarks reported in \cite{bos2018kyber}.
+The dominant computational overhead in Star-Mesh is expected to be the mixnet onion routing (Sphinx packet construction \cite{sphinx}), which requires multiple asymmetric operations per hop and is independent of the PQC primitives.
 
 % ============================================================
 \section{Assumptions and Limitations}
@@ -1226,10 +1399,17 @@ which requires multiple asymmetric operations per hop and is independent of the 
 We consolidate the protocol's assumptions and known limitations here for clarity.
 
 \begin{enumerate}
+  \item \textbf{ML-DSA-65 EUF-CMA security} (Assumption~\ref{asm:mldsa}): ML-DSA-65 is secure
+        against existential forgery under chosen-message attacks.
+  \item \textbf{CDH hardness on Curve25519} (Assumption~\ref{asm:cdh}): CDH on Curve25519 is hard
+        against classical adversaries, required for implicit authentication ($DH_1$).
   \item \textbf{Module-LWE hardness} (Assumption~\ref{asm:mlwe}): ML-KEM-768 is IND-CCA2
         secure under MLWE with $n = 256$, $k = 3$.
   \item \textbf{HKDF as PRF} (Assumption~\ref{asm:hkdf}): HKDF-SHA3-256 is modeled as a
         two-stage PRF following \cite{krawczyk2010hkdf}.
+  \item \textbf{BLAKE3-KDF as PRF} (Assumption~\ref{asm:blake3}): BLAKE3's keyed hashing
+        mode is modeled as a PRF; required for pseudorandomness of per-message keys $MK_i$
+        and hence for message confidentiality.
   \item \textbf{Deletion schedule enforced} (Assumption~\ref{asm:deletion}): An operational
         assumption; not proven by the protocol logic but required for FS and PCS.
   \item \textbf{RNG integrity after $t_{rec}$} (Assumption~\ref{asm:rng}): The RNG is clean
@@ -1241,11 +1421,19 @@ We consolidate the protocol's assumptions and known limitations here for clarity
         protected against Sybil and eclipse attacks; this is not proven by the protocol.
   \item \textbf{Out-of-order delivery and PCS} (Corollary~\ref{cor:pcs}): PCS restoration is
         conditional on the round-trip completing; delayed network delivery defers healing.
+  \item \textbf{Dropped PQ-step messages}: If an authenticated $kem\_id$ entry or its matching
+        ciphertext is
+        permanently lost (rather than merely delayed), the PQ-initiator must timeout and
+        re-initiate with a fresh keypair.  Retry policy is an implementation concern.
   \item \textbf{Skipped-key cache and PCS}: Keys cached in $\mathcal{K}_{skipped}$ before
         $t_{rec}$ remain compromised even after the PQ ratchet round-trip.
-  \item \textbf{Implicit authentication only in $M_0$}: Star-Mesh provides only implicit
-        authentication for $M_0$.  Explicit session-level mutual authentication (e.g., a
-        signed transcript) is left for future work.
+  \item \textbf{Confirmation tags and half-open sessions}: $tag_A$ gives Bob one-sided explicit
+        key confirmation in $M_0$; the session is not mutually confirmed until Alice receives and
+        verifies Bob's authenticated response $tag_B = \HMAC_{\mathrm{SHA3\text{-}256}}(K_{conf},
+        \strlit{Bob} \| M_0^{core})$.  Until that response is received, Alice must treat the
+        session as pending one-sided confirmation only and must not send application data that
+        requires mutual confirmation guarantees.  A missing or unverifiable $tag_B$ is an
+        authentication/availability failure, not implicit permission to proceed.
 \end{enumerate}
 
 % ============================================================
@@ -1300,7 +1488,13 @@ The technical obstacle that prevents MLS-style designs from operating over a dec
 DHT is their dependence on a central Delivery Service to impose a total ordering on group
 operations and maintain tree consistency: without such a server, concurrent pre-key updates
 produce conflicting tree states that cannot be resolved without a global coordination
-mechanism, a problem that does not arise in Star-Mesh's pairwise ratchet setting.
+mechanism, a problem that does not arise in Star-Mesh's pairwise ratchet setting.  A plausible
+future direction is D-MLS: use a CRDT operation set for signed proposals and commits, retain the
+MLS parent tree hash and confirmation-tag checks, and apply a deterministic winner rule to
+concurrent valid commits.  This would provide convergence for clients with the same operation
+set, but would not itself provide Byzantine consensus or prevent DHT eclipse and fork attacks;
+the full design and required security tests are left to a separate research track in
+\texttt{docs/d-mls-design.md}.
 
 \paragraph{Hybrid KEM Composition.}
 Giacon et al.\ \cite{giacon2018kem} proved that the concatenation combiner for KEMs
@@ -1341,11 +1535,14 @@ freshness definition that integrates the RevealRNG oracle.  We argued security v
 reductions showing that both properties follow from the IND-CCA2 security of ML-KEM-768 via
 explicit named hybrid game sequences.  Authentication is similarly argued to follow from EUF-CMA
 of ML-DSA-65.  The bundle signature covers all pre-key material (including OTPK and PQ-OTPK
-batch hashes) to prevent substitution attacks.  The protocol's overhead is modest: amortised
-per-message PQ overhead is approximately $22.7 + \delta_{\text{DHT}}$ bytes at $\Delta = 50$,
-where $\delta_{\text{DHT}} \approx 1$--$10$ bytes is an illustrative engineering estimate
-subject to routing topology and deployment configuration.  All assumptions are listed
-explicitly in Section~\ref{sec:assumptions} and Section~\ref{sec:assumptionslimitations}.
+batch hashes) to prevent substitution attacks.  To complement these proof sketches, we supplied
+two machine-checked ProVerif~\cite{proverif} models that verify session-key secrecy, MITM
+resistance, pre-compromise forward secrecy, PCS healing, and the skipped-key cache caveat in
+the symbolic Dolev-Yao model.  The protocol's overhead is modest: amortised per-message PQ
+overhead is approximately $22.7 + \delta_{\text{DHT}}$ bytes at $\Delta = 50$, where
+$\delta_{\text{DHT}} \approx 1$--$10$ bytes is an illustrative engineering estimate subject to
+routing topology and deployment configuration.  All assumptions are listed explicitly in
+Section~\ref{sec:assumptions} and Section~\ref{sec:assumptionslimitations}.
 
 Key assumptions underlying the security claims are: Module-LWE hardness
 (Assumption~\ref{asm:mlwe}), the deletion schedule being enforced by the implementation
@@ -1362,12 +1559,13 @@ interoperability testing, formal verification, and operational abuse-resistance 
 
 \paragraph{Future Work.}
 Several directions remain open.  First, a full composable security proof (e.g., in the UC
-framework \cite{uc_framework}) for the complete protocol would be desirable.  Second, group
-messaging extensions analogous to PQ-MLS \cite{rfc9420} should be explored for the DHT
-setting.  Third, an implementation and empirical performance evaluation on resource-constrained
-devices (IoT, mobile) would validate the practical viability of the design.  Fourth, an
-explicit session-authentication mechanism for $M_0$ (to complement the current implicit
-authentication) is a natural extension.
+framework \cite{uc_framework}) for the complete protocol would be desirable; the present
+ProVerif models provide symbolic evidence but not a computational composable treatment.
+Second, group messaging extensions analogous to PQ-MLS \cite{rfc9420} should be explored
+for the DHT setting.  Third, an implementation and empirical performance evaluation on
+resource-constrained devices (IoT, mobile) would validate the practical viability of the
+design.  Fourth, the confirmation-tag mechanism for $M_0$ requires a full mutual-confirmation
+response path and computational analysis under replay, timeout, and transcript-rebinding attacks.
 
 \section*{Acknowledgements}
 The author thanks the anonymous reviewers for their time and feedback.  AI-assisted writing
@@ -1545,6 +1743,12 @@ Y. Dodis, T. Ristenpart, and S. Vadhan.
 \emph{Randomness Condensers for Efficiently Samplable, Seed-Dependent Sources}.
 In \emph{Proceedings of TCC 2012}, LNCS 7194, pp.~618--635, Springer, 2012.
 \url{https://doi.org/10.1007/978-3-642-28914-9_35}
+
+\bibitem{proverif}
+B. Blanchet.
+\emph{Modeling and Verifying Security Protocols with the Applied Pi Calculus and ProVerif}.
+\emph{Foundations and Trends in Privacy and Security}, 1(1--2):1--135, 2016.
+\url{https://doi.org/10.1561/3300000004}
 
 \end{thebibliography}
 

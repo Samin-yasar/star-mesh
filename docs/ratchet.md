@@ -68,6 +68,8 @@ The message header must provide enough info for the receiver to synchronize the 
 - `pn`: Number of messages in the previous DH ratchet.
 - `pq_pk`: (Optional) New ephemeral ML-KEM public key (if Alice is initiating a PQ step).
 - `pq_ct`: (Optional) ML-KEM ciphertext (if Alice is responding to Bob's PQ step).
+- `kem_id`: Authenticated identifier for a PQ ratchet exchange; responses are matched by this
+  identifier rather than arrival order.
 
 ### Final Encryption:
 - **Ciphertext:** $C = \text{AES-256-GCM}(MK, \text{Plaintext}, \text{Header})$

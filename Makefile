@@ -1,4 +1,4 @@
-.PHONY: help all paper python-poc rust-poc clean
+.PHONY: help all paper python-poc rust-poc mixnet-sim verify clean
 
 PYTHON ?= python3
 VENV_DIR := .venv
@@ -11,6 +11,8 @@ help:
 	@echo "  make paper        Build the LaTeX manuscript"
 	@echo "  make python-poc   Run the Python protocol demonstration"
 	@echo "  make rust-poc     Run the Rust proof-of-concept"
+	@echo "  make mixnet-sim   Run the empirical mixnet queue simulation"
+	@echo "  make verify       Run ProVerif mechanized verification"
 	@echo "  make clean        Remove paper build artifacts"
 	@echo "  make help         Show this message"
 
@@ -27,6 +29,13 @@ python-poc: $(VENV_PYTHON)
 
 rust-poc:
 	cargo run --manifest-path poc/rust/Cargo.toml
+
+mixnet-sim:
+	$(PYTHON) poc/python/mixnet_sim.py
+
+verify:
+	opam exec -- proverif formal/pq_x3dh.pv
+	opam exec -- proverif formal/ratchet.pv
 
 clean:
 	$(MAKE) -C paper clean

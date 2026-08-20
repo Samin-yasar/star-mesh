@@ -1,0 +1,227 @@
+(*
+ * ratchet.pv — Mechanized verification of Star-Mesh PQ Double Ratchet
+ *
+ * Reference: paper.tex §3.5 (Ephemeral PQ Double Ratchet),
+ *            §4   (Security Model, Definitions 4.7–4.11),
+ *            §5.3 (Security Claim 5.3 & Corollary 5.4/5.5 — PCS Healing Bound & Caveats)
+ *
+ * Tool:    ProVerif 2.04+
+ * Run:     proverif ratchet.pv
+ *
+ * ── Protocol & Model Design ───────────────────────────────────────────────
+ *
+ * 1. Forward Secrecy Witness (Pre-Compromise):
+ *    Alice encrypts w_pre_comp in Epoch 0. The symmetric chain key is immediately
+ *    advanced and the message key zeroized (Assumption 4.5).
+ *
+ * 2. State Compromise (O^Reveal at t_comp):
+ *    The adversary invokes CompromiseState, obtaining the entire active session
+ *    state (current RK, current CK, active DH secret) at epoch 1.
+ *
+ * 3. Skipped-Key Caveat Witness (Corollary 5.5 Caveat #2):
+ *    A message key derived/skipped prior to t_rec remains exposed in the
+ *    skipped_keys cache. w_skipped_pre is encrypted under this key.
+ *    Attacker CAN decrypt w_skipped_pre (verifying the negative caveat formally).
+ *
+ * 4. Post-Compromise Security Witness (Post-Healing):
+ *    Alice generates fresh ML-KEM keypair after t_rec (Assumption 4.6).
+ *    Bob encapsulates against it, sending ct_PQ.
+ *    Alice decapsulates, completes the PQ ratchet step, and derives healed RK'.
+ *    Alice encrypts w_post_heal.
+ *    Attacker CANNOT decrypt w_post_heal (verifying PCS restoration).
+ *
+ * ── Expected query results ────────────────────────────────────────────────
+ *   RESULT attacker(w_pre_comp[]) is false.    (Forward Secrecy holds)     ✓
+ *   RESULT attacker(w_post_heal[]) is false.   (PCS Healing holds)         ✓
+ *   RESULT attacker(w_skipped_pre[]) is true.  (Caveat #2 verified)        ✓
+ *   RESULT event(BobReceived(...)) ==> event(AliceSent(...)) is true.      ✓
+ *)
+
+(* ═══════════════════════════════════════════════════════════════════════════
+   §1  TYPES
+   ═══════════════════════════════════════════════════════════════════════════ *)
+
+type dhSk.
+type dhPk.
+type kemSk.
+type kemPk.
+type kemSeed.
+type kemCt.
+
+(* ═══════════════════════════════════════════════════════════════════════════
+   §2  CHANNELS
+   ═══════════════════════════════════════════════════════════════════════════ *)
+
+free pub: channel.
+
+(* ═══════════════════════════════════════════════════════════════════════════
+   §3  CRYPTOGRAPHIC PRIMITIVES
+   ═══════════════════════════════════════════════════════════════════════════ *)
+
+(* Classical X25519 Diffie-Hellman *)
+fun dh_pk(dhSk): dhPk.
+fun dh(dhSk, dhPk): bitstring.
+equation forall a: dhSk, b: dhSk;
+    dh(a, dh_pk(b)) = dh(b, dh_pk(a)).
+
+(* ML-KEM-768 IND-CCA2 Axiomatisation *)
+fun kem_pk(kemSk): kemPk.
+fun kem_enc_ct(kemPk, kemSeed): kemCt.
+fun kem_enc_ss(kemSeed): bitstring.
+
+reduc forall sk: kemSk, seed: kemSeed;
+    kem_dec(sk, kem_enc_ct(kem_pk(sk), seed)) = kem_enc_ss(seed).
+
+(* Symmetric Ratchet KDF — BLAKE3 (§3.5.2) *)
+fun blake3_mk(bitstring): bitstring.  (* Domain: "StarMesh-MK" *)
+fun blake3_ck(bitstring): bitstring.  (* Domain: "StarMesh-CK" *)
+
+(* Ratchet Root KDF — HKDF-SHA3-256 (§3.5.3, §3.5.4) *)
+fun hkdf_dh_rk(bitstring, bitstring): bitstring.  (* ikm = DH_new, salt = RK *)
+fun hkdf_dh_ck(bitstring, bitstring): bitstring.
+fun hkdf_pq_rk(bitstring, bitstring): bitstring.  (* ikm = SS_PQ,  salt = RK *)
+fun hkdf_pq_ck(bitstring, bitstring): bitstring.
+
+(* AEAD (AES-256-GCM) *)
+fun aead_enc(bitstring, bitstring): bitstring.
+reduc forall k: bitstring, m: bitstring;
+    aead_dec(k, aead_enc(k, m)) = m.
+
+(* Helpers *)
+fun dhPk2b(dhPk): bitstring [typeConverter].
+fun kemCt2b(kemCt): bitstring [typeConverter].
+
+(* ═══════════════════════════════════════════════════════════════════════════
+   §4  SECRECY WITNESSES
+   ═══════════════════════════════════════════════════════════════════════════ *)
+
+free w_pre_comp: bitstring [private].     (* Message in Epoch 0 (Pre-compromise) *)
+free w_skipped_pre: bitstring [private].  (* Skipped key message before t_rec     *)
+free w_post_heal: bitstring [private].    (* Message after PQ ratchet round-trip  *)
+
+(* ═══════════════════════════════════════════════════════════════════════════
+   §5  EVENTS
+   ═══════════════════════════════════════════════════════════════════════════ *)
+
+event AliceSentPreComp(bitstring).
+event BobReceivedPreComp(bitstring).
+event StateCompromised(bitstring).
+event AliceSentPostHeal(bitstring).
+event BobReceivedPostHeal(bitstring).
+
+(* ═══════════════════════════════════════════════════════════════════════════
+   §6  QUERIES
+   ═══════════════════════════════════════════════════════════════════════════ *)
+
+(*
+ * Q1 — FORWARD SECRECY (paper.tex §3.5.6, §4.3, Security Claim 5.2)
+ * Pre-compromise message key and chain key were zeroized according to schedule.
+ * Compromising session state at t_comp does NOT leak w_pre_comp.
+ *
+ * EXPECTED: false (Secure)
+ *)
+query attacker(w_pre_comp).
+
+(*
+ * Q2 — POST-COMPROMISE SECURITY HEALING (paper.tex §4.4, Security Claim 5.3, Corollary 5.4)
+ * After one complete PQ roundtrip with fresh post-t_rec randomness,
+ * confidentiality of subsequent epochs is restored.
+ *
+ * EXPECTED: false (Secure)
+ *)
+query attacker(w_post_heal).
+
+(*
+ * Q3 — SKIPPED-KEY NEGATIVE CAVEAT (paper.tex Corollary 5.4 / 5.5 Caveat #2)
+ * Keys in skipped_keys cache generated prior to t_rec remain compromised.
+ * This machine-checks our explicit limitation claim.
+ *
+ * EXPECTED: true (Attacker can decrypt, confirming caveat)
+ *)
+query attacker(w_skipped_pre).
+
+(*
+ * Q4 — CORRESPONDENCE / AUTHENTICITY AFTER HEALING
+ *
+ * EXPECTED: true
+ *)
+query m: bitstring;
+    event(BobReceivedPostHeal(m)) ==> event(AliceSentPostHeal(m)).
+
+(* ═══════════════════════════════════════════════════════════════════════════
+   §7  RATIO STATE THREADS & PROTOCOL PROCESSES
+   ═══════════════════════════════════════════════════════════════════════════ *)
+
+let RatchetProtocol(init_rk: bitstring, init_cks: bitstring) =
+    (* --- EPOCH 0: Pre-compromise communication (Forward Secrecy baseline) --- *)
+    let mk_0 = blake3_mk(init_cks) in
+    let ck_1 = blake3_ck(init_cks) in
+    (* mk_0 is used to encrypt w_pre_comp and immediately zeroized *)
+    event AliceSentPreComp(w_pre_comp);
+    out(pub, aead_enc(mk_0, w_pre_comp));
+
+    (* Bob receives and decrypts epoch 0 *)
+    let dec_pre = aead_dec(mk_0, aead_enc(mk_0, w_pre_comp)) in
+    event BobReceivedPreComp(dec_pre);
+
+    (* Derive skipped key for out-of-order test (Corollary 5.5 Caveat #2) *)
+    let mk_skipped = blake3_mk(ck_1) in
+    let ck_2 = blake3_ck(ck_1) in
+    out(pub, aead_enc(mk_skipped, w_skipped_pre));
+
+    (* Active DH key at epoch 1 *)
+    new dh_sk_A1: dhSk;
+    new dh_sk_B1: dhSk;
+    out(pub, dh_pk(dh_sk_A1));
+    out(pub, dh_pk(dh_sk_B1));
+
+    (* --- EPOCH 1: STATE COMPROMISE AT t_comp (O^Reveal) --- *)
+    (* Attacker gains active RK, active CK, active DH secrets, and the skipped keys cache *)
+    event StateCompromised(init_rk);
+    out(pub, (init_rk, ck_2, dh_sk_A1, dh_sk_B1, mk_skipped));
+
+    (* --- EPOCH 2: PQ RATCHET STEP (PCS HEALING ROUNDTRIP) --- *)
+    (* Step 1 (KeyGen): Alice samples fresh ephemeral ML-KEM keypair after t_rec (clean RNG) *)
+    new pq_sk_A: kemSk;
+    let pq_pk_A = kem_pk(pq_sk_A) in
+    out(pub, pq_pk_A);
+
+    (* Step 2 (Encaps): Bob encapsulates against Alice's fresh PQ public key *)
+    in(pub, =pq_pk_A);
+    new seed_pq: kemSeed;
+    let ct_pq = kem_enc_ct(pq_pk_A, seed_pq) in
+    let ss_pq_bob = kem_enc_ss(seed_pq) in
+    out(pub, ct_pq);
+
+    (* Step 3 (Decaps & Update): Alice decapsulates and derives healed root key *)
+    in(pub, =ct_pq);
+    let ss_pq_alice = kem_dec(pq_sk_A, ct_pq) in
+    (* Alice updates root chain *)
+    let rk_healed_alice = hkdf_pq_rk(ss_pq_alice, init_rk) in
+    let cks_healed_alice = hkdf_pq_ck(ss_pq_alice, init_rk) in
+
+    (* Bob updates root chain *)
+    let rk_healed_bob = hkdf_pq_rk(ss_pq_bob, init_rk) in
+    let cks_healed_bob = hkdf_pq_ck(ss_pq_bob, init_rk) in
+
+    (* --- EPOCH 3: POST-HEALING MESSAGING --- *)
+    let mk_post_alice = blake3_mk(cks_healed_alice) in
+    event AliceSentPostHeal(w_post_heal);
+    out(pub, aead_enc(mk_post_alice, w_post_heal));
+
+    (* Bob decrypts post-healing message *)
+    in(pub, post_cipher: bitstring);
+    let mk_post_bob = blake3_mk(cks_healed_bob) in
+    let dec_post = aead_dec(mk_post_bob, post_cipher) in
+    if dec_post = w_post_heal then
+        event BobReceivedPostHeal(dec_post)
+.
+
+(* ═══════════════════════════════════════════════════════════════════════════
+   §8  MAIN PROCESS
+   ═══════════════════════════════════════════════════════════════════════════ *)
+
+process
+    new root_key_0: bitstring;
+    new chain_key_0: bitstring;
+    RatchetProtocol(root_key_0, chain_key_0)

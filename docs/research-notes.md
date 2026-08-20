@@ -57,6 +57,13 @@ The following items are the main open questions for further work.
 2. How should ephemeral key state be handled under churn and reordering at scale?
 3. What is the minimum viable key-rotation policy that preserves both security and operational simplicity?
 4. HKDF-SHA3-256 is established as the correct instantiation (paper.tex §2.4, Assumption 4.2). The remaining open question is whether any side-channel or timing leakage in the SHA3/Keccak permutation path is relevant under the protocol's threat model, and whether constant-time guarantees from the `sha3` crate are sufficient.
+5. D-MLS is a separate research track. MLS commits are authenticated transitions over a specific
+	parent tree, so a CRDT should reconcile signed operations and detect forks, not merge tree
+	states directly. The proposed operation-set and checkpoint model is documented in
+	`docs/d-mls-design.md`.
+6. A UC formulation is also a separate proof track. The ideal functionality and explicit mixnet
+	leakage boundary are documented in `docs/uc-formulation.md`; pairwise game proofs and symbolic
+	ProVerif checks do not imply composable realization.
 
 ## 6. Publication perspective
 

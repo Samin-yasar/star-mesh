@@ -143,6 +143,26 @@ This plan decomposes the Star-Mesh protocol into six engineering phases, moving 
 - **Availability Announcement**: When Bob comes online, he publishes a signed `OnlineAnnouncement` to a Gossipsub topic `"/starmesh/online/v1/H(pk_B)[0:4]"`.
 - **Pull Trigger**: Alice’s client, if it has pending messages for Bob, receives the gossip and initiates a direct P2P connection.
 
+### 4.4 Milestone: D-MLS Group Messaging Research Track
+- **Design note**: See `docs/d-mls-design.md` for the operation-set CRDT, deterministic commit
+  selection, checkpoint format, and fork-handling rules.
+- **Core invariant**: CRDT union reconciles signed proposals and commits, but MLS tree states
+  are never merged directly; only one valid commit with the matching parent tree may advance an
+  epoch.
+- **Deliverable**: A bounded simulator with concurrent Add/Remove/Update commits, DHT partitions,
+  replica equivocation, convergence checks, and fork-evidence checks.
+- **Security gate**: Do not claim Byzantine consensus or MLS security until convergence,
+  unauthenticated-transition rejection, fork detection, and post-compromise recovery are tested
+  separately.
+
+### 4.5 Milestone: UC Security Formulation
+- **Specification**: See `docs/uc-formulation.md` for `F_SM`, corruption/recovery semantics,
+  ratchet epochs, and the explicit mixnet leakage interface.
+- **Deliverable**: Define the real and ideal protocol interfaces, a simulator, and a computational
+  realization theorem quantified over sessions, epochs, corruptions, and transmissions.
+- **Security gate**: The existing game proofs and ProVerif models are not UC proofs; do not claim
+  composable security until environment/simulator indistinguishability is established.
+
 ---
 
 ## 5. Phase 4: Local Storage & Cross-Platform Interface (Months 7–9)
