@@ -6,36 +6,34 @@ secret key, while a second initiation can overwrite the first keypair.
 
 ## State
 
-Each session maintains:
+The Rust proof-of-concept implements this state in `RatchetState`:
 
 ```text
 pq_send_seq: u64
 pq_recv_seq: u64
-pq_outstanding: map<kem_id, {local_sk, local_pk, sent_epoch, status}>
-pq_incoming: map<kem_id, {ciphertext, peer_pk, received_epoch, status}>
+pq_outstanding: map<kem_id, {local_sk, sent_epoch, status}>
+pq_incoming: map<kem_id, {shared_secret, ciphertext, sequence}>
 pq_retired: bounded set<kem_id>
 ```
 
-`kem_id = H("StarMesh-KEM-v1" || session_id || initiator_identity || pq_pk || seq)` is carried
-in the authenticated message header. It is not inferred from arrival order.
+`kem_id = H("StarMesh-KEM-v1" || session_id || pq_pk || seq)` is carried in the
+ML-DSA-authenticated message header. It is not inferred from arrival order.
 
 ## Transitions
 
-1. **Initiate:** generate a fresh ML-KEM keypair, allocate `kem_id`, insert it into
-   `pq_outstanding`, and transmit `pq_pk` with the authenticated header.
-2. **Encapsulate:** on a valid unseen `kem_id`, encapsulate once against its `pq_pk`, insert the
-   ciphertext in the peer's response record, and mark the incoming record `encapsulated`.
-3. **Receive response:** look up `kem_id`, require the ciphertext and transcript binding to match,
-   decapsulate exactly once, and derive the next root/entropy-pool state. Mark the record
-   `completed`, zeroize its secret key, and add `kem_id` to `pq_retired`.
-4. **Duplicate/replay:** a completed or retired `kem_id` is idempotently acknowledged or rejected;
-   it never causes a second root-key update.
+1. **Initiate:** `pq_ratchet_init` generates a fresh ML-KEM keypair, allocates `kem_id`, signs
+   the recovery header, inserts the secret key into `pq_outstanding`, and transmits the header.
+2. **Encapsulate:** `pq_ratchet_encapsulate` verifies the trusted ML-DSA identity and header
+   bindings, encapsulates once, and stores the result in the completed buffer.
+3. **Receive response:** `pq_ratchet_decapsulate` consumes the matching secret key exactly once
+   and queues the result. Ordered draining derives the new root and both directional chains,
+   then retires the identifier.
+4. **Duplicate/replay:** a completed or retired `kem_id` is rejected and cannot update the root
+   twice.
 5. **Timeout:** an outstanding record may expire and be retired without changing the root key.
    Re-initiation uses a new sequence and keypair.
-6. **Concurrent completion:** completed updates are applied in a deterministic order, such as
-   increasing `kem_id` or authenticated send sequence. Each update consumes the current root key
-   and produces a new epoch; replies for later IDs wait until all earlier selected updates have
-   retired.
+6. **Concurrent completion:** completed updates are applied in increasing authenticated
+   sequence. Later responses remain buffered until earlier selected updates have retired.
 
 ## Why the order rule matters
 

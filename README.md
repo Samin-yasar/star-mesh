@@ -40,7 +40,7 @@ Star-Mesh/
 ├── paper/                     # LaTeX source for the paper
 │   ├── Makefile               # Paper build pipeline
 │   ├── paper.tex              # Main manuscript source
-│   ├── paper.md               # Markdown export / draft companion
+│   ├── paper.md               # Generated Markdown export of paper.tex
 │   └── ...                    # auxiliary LaTeX artifacts
 ├── poc/                       # Reference implementations
 │   ├── python/
@@ -51,7 +51,7 @@ Star-Mesh/
 │           └── main.rs
 ├── .venv/                     # Local Python environment for reproducible demo runs
 ├── .gitignore
-└── convert.py                 # Compatibility helper for LaTeX-to-Markdown conversion
+└── convert.py                 # LaTeX-to-Markdown conversion helper
 ```
 
 ---
@@ -89,7 +89,15 @@ or, from the project root:
 make
 ```
 
-The paper pipeline produces the manuscript under the paper directory and is intended as the canonical archival artifact for the design.
+The paper pipeline produces the manuscript PDF and regenerates `paper/paper.md` from
+`paper/paper.tex` and the current LaTeX labels. The LaTeX source and PDF are the archival
+manuscript artifacts; the Markdown file is a generated reading/export format.
+
+To regenerate only the Markdown export after a successful LaTeX build:
+
+```bash
+make paper-md
+```
 
 ### Build and maintenance helpers
 

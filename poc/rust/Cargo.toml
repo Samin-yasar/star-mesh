@@ -1,7 +1,8 @@
 [package]
 name = "star-mesh-poc"
 version = "0.4.0"
-edition = "2026"
+edition = "2021"
+rust-version = "1.85"
 description = "Proof-of-concept for Star-Mesh hybrid PQ-X3DH + Double Ratchet"
 license = "Apache-2.0"
 
@@ -12,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 # FIPS 203 ML-KEM-768 (RustCrypto pure-Rust implementation)
 ml-kem   = { version = "0.3",  features = ["zeroize"] }
+ml-dsa   = { version = "0.1.1", features = ["rand_core", "zeroize"] }
 # RFC 7748 X25519 Diffie-Hellman
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 # HKDF-SHA3-256 — matches paper.tex §3.4 and Assumption 4.2 exactly

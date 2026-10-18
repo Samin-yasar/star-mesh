@@ -1,11 +1,13 @@
-use rand_core::Rng;
-use x25519_dalek::{StaticSecret, PublicKey as XPublicKey};
-use ml_kem::{MlKem768, EncapsulationKey, DecapsulationKey, Encapsulate, KeyExport, Seed};
-use ml_kem::kem::Decapsulate;
-use hkdf::Hkdf;
 use hkdf::hmac::{Hmac, Mac};
+use hkdf::Hkdf;
+use ml_dsa::{Generate, Keypair, MlDsa65, Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ml_kem::kem::Decapsulate;
+use ml_kem::{DecapsulationKey, Encapsulate, EncapsulationKey, KeyExport, MlKem768, Seed};
+use rand_core::Rng;
 use sha3::Sha3_256;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 // Typings for convenience matching the paper's specs
 type Key32 = [u8; 32];
@@ -19,6 +21,11 @@ pub enum CryptoError {
     InvalidState,
     NoChainKey,
     AuthenticationFailed,
+    DuplicateKemId,
+    UnknownKemId,
+    BufferFull,
+    InvalidHeader,
+    OutOfOrderKemUpdate,
 }
 
 impl std::fmt::Display for CryptoError {
@@ -28,11 +35,77 @@ impl std::fmt::Display for CryptoError {
             Self::InvalidState => write!(f, "Invalid ratchet state"),
             Self::NoChainKey => write!(f, "No chain key available"),
             Self::AuthenticationFailed => write!(f, "Handshake confirmation failed"),
+            Self::DuplicateKemId => write!(f, "duplicate KEM identifier"),
+            Self::UnknownKemId => write!(f, "unknown KEM identifier"),
+            Self::BufferFull => write!(f, "KEM buffer is full"),
+            Self::InvalidHeader => write!(f, "invalid recovery-update header"),
+            Self::OutOfOrderKemUpdate => write!(f, "KEM update is not ready to apply"),
         }
     }
 }
 
 impl std::error::Error for CryptoError {}
+
+type KemId = Key32;
+const KEM_BUFFER_CAPACITY: usize = 32;
+
+pub struct RecoveryUpdateHeader {
+    pub session_id: Key32,
+    pub kem_id: KemId,
+    pub sequence: u64,
+    pub epoch: u64,
+    pub predecessor: Key32,
+    pub pq_pk: EncapsulationKey<MlKem768>,
+    pub identity_pk: VerifyingKey<MlDsa65>,
+    pub signature: Signature<MlDsa65>,
+}
+
+pub struct RecoveryUpdateResponse {
+    pub header: KemId,
+    pub ciphertext: ml_kem::Ciphertext<MlKem768>,
+}
+
+struct OutstandingKem {
+    sequence: u64,
+    secret_key: Option<DecapsulationKey<MlKem768>>,
+}
+
+struct CompletedKem {
+    sequence: u64,
+    shared_secret: Key32,
+    ciphertext: Vec<u8>,
+}
+
+fn recovery_header_bytes(
+    session_id: &Key32,
+    kem_id: &KemId,
+    sequence: u64,
+    epoch: u64,
+    predecessor: &Key32,
+    pq_pk: &EncapsulationKey<MlKem768>,
+) -> Vec<u8> {
+    let mut bytes = b"StarMesh-Recovery-v1".to_vec();
+    bytes.extend_from_slice(session_id);
+    bytes.extend_from_slice(kem_id);
+    bytes.extend_from_slice(&sequence.to_be_bytes());
+    bytes.extend_from_slice(&epoch.to_be_bytes());
+    bytes.extend_from_slice(predecessor);
+    bytes.extend_from_slice(pq_pk.to_bytes().as_ref());
+    bytes
+}
+
+fn kem_id(session_id: &Key32, sequence: u64, pq_pk: &EncapsulationKey<MlKem768>) -> KemId {
+    let mut h = blake3::Hasher::new();
+    h.update(b"StarMesh-KEM-v1");
+    h.update(session_id);
+    h.update(&sequence.to_be_bytes());
+    h.update(pq_pk.to_bytes().as_ref());
+    *h.finalize().as_bytes()
+}
+
+fn demo_signing_key() -> SigningKey<MlDsa65> {
+    SigningKey::<MlDsa65>::generate()
+}
 
 /// Generate an X25519 StaticSecret using rand 0.10's ThreadRng.
 /// Fills 32 raw bytes and constructs from them (bridges rand_core 0.6 / 0.10 split).
@@ -74,10 +147,16 @@ pub struct BobSecretBundle {
 
 /// Helper to run HKDF-SHA3-256 (paper.tex §3.4, Assumption 4.2)
 /// Implements Section 3.4 of the paper: OKM = HKDF-SHA3-256(SS_hybrid, 0^32, info, L)
-fn hkdf_derive(ikm: &[u8], salt: Option<&[u8]>, info: &[u8], len: usize) -> Result<Vec<u8>, CryptoError> {
+fn hkdf_derive(
+    ikm: &[u8],
+    salt: Option<&[u8]>,
+    info: &[u8],
+    len: usize,
+) -> Result<Vec<u8>, CryptoError> {
     let hk = Hkdf::<Sha3_256>::new(salt, ikm);
     let mut okm = vec![0u8; len];
-    hk.expand(info, &mut okm).map_err(|_| CryptoError::HkdfExpand)?;
+    hk.expand(info, &mut okm)
+        .map_err(|_| CryptoError::HkdfExpand)?;
     Ok(okm)
 }
 
@@ -167,8 +246,8 @@ pub fn pq_x3dh_initiator(
     let mut confirm_info = b"StarMesh-Confirm".to_vec();
     confirm_info.extend_from_slice(&info);
     let confirmation_key = hkdf_derive(&okm, Some(&[0u8; 32]), &confirm_info, 32)?;
-    let mut confirmation_mac = HmacSha3_256::new_from_slice(&confirmation_key)
-        .map_err(|_| CryptoError::HkdfExpand)?;
+    let mut confirmation_mac =
+        HmacSha3_256::new_from_slice(&confirmation_key).map_err(|_| CryptoError::HkdfExpand)?;
     confirmation_mac.update(&info);
     let mut confirmation_tag = [0u8; 32];
     confirmation_tag.copy_from_slice(&confirmation_mac.finalize().into_bytes());
@@ -241,8 +320,8 @@ pub fn pq_x3dh_responder(
     let mut confirm_info = b"StarMesh-Confirm".to_vec();
     confirm_info.extend_from_slice(&info);
     let confirmation_key = hkdf_derive(&okm_bytes, Some(&[0u8; 32]), &confirm_info, 32)?;
-    let mut confirmation_mac = HmacSha3_256::new_from_slice(&confirmation_key)
-        .map_err(|_| CryptoError::HkdfExpand)?;
+    let mut confirmation_mac =
+        HmacSha3_256::new_from_slice(&confirmation_key).map_err(|_| CryptoError::HkdfExpand)?;
     confirmation_mac.update(&info);
     confirmation_mac
         .verify_slice(&m0.confirmation_tag)
@@ -256,12 +335,21 @@ pub fn pq_x3dh_responder(
 
 /// 3.3 Ratchet State struct
 pub struct RatchetState {
+    pub session_id: Key32,
+    pub is_initiator: bool,
+    signing_key: SigningKey<MlDsa65>,
+    trusted_identity: Option<VerifyingKey<MlDsa65>>,
     pub root_key: Key32,
     pub entropy_pool: Key32,
+    transcript_hash: Key32,
+    valid_predecessors: HashSet<Key32>,
     pub send_chain_key: Option<Key32>,
     pub recv_chain_key: Option<Key32>,
-    pub pq_sk_local: Option<DecapsulationKey<MlKem768>>,
-    pub pq_pk_local: Option<EncapsulationKey<MlKem768>>,
+    pub next_kem_sequence: u64,
+    pub next_kem_to_apply: u64,
+    outstanding_kems: HashMap<KemId, OutstandingKem>,
+    completed_kems: HashMap<KemId, CompletedKem>,
+    retired_kems: HashSet<KemId>,
     pub pq_step_counter: u32,
     pub skipped_keys: HashMap<(Key32, u32), Key32>,
 }
@@ -287,25 +375,44 @@ impl RatchetState {
             send_chain_key = None;
         }
 
+        let transcript_hash = *blake3::hash(b"StarMesh-transcript-v1").as_bytes();
         Self {
+            session_id: blake3::hash(okm).into(),
+            is_initiator,
+            signing_key: demo_signing_key(),
+            trusted_identity: None,
             root_key,
             entropy_pool: root_key,
+            transcript_hash,
+            valid_predecessors: HashSet::from([transcript_hash]),
             send_chain_key,
             recv_chain_key,
-            pq_sk_local: None,
-            pq_pk_local: None,
+            next_kem_sequence: 0,
+            next_kem_to_apply: 0,
+            outstanding_kems: HashMap::new(),
+            completed_kems: HashMap::new(),
+            retired_kems: HashSet::new(),
             pq_step_counter: 0,
             skipped_keys: HashMap::new(),
         }
     }
 
+    pub fn set_trusted_identity(&mut self, identity: VerifyingKey<MlDsa65>) {
+        self.trusted_identity = Some(identity);
+    }
+
+    pub fn identity_verifying_key(&self) -> VerifyingKey<MlDsa65> {
+        self.signing_key.verifying_key().clone()
+    }
+
     /// 3.3.1 Symmetric Ratchet sending step
     /// CLAIM: Produces a unique message key, advances chain key, is deterministic given input
     pub fn ratchet_encrypt(&mut self) -> Result<Key32, CryptoError> {
-        let ck = self.send_chain_key.as_mut().ok_or(CryptoError::NoChainKey)?;
-        let mk = blake3_kdf(ck, 0x01, b"StarMesh-MK");
-        let next_ck = blake3_kdf(ck, 0x02, b"StarMesh-CK");
-        ck.copy_from_slice(&next_ck);
+        let mut ck = self.send_chain_key.take().ok_or(CryptoError::NoChainKey)?;
+        let mk = blake3_kdf(&ck, 0x01, b"StarMesh-MK");
+        let next_ck = blake3_kdf(&ck, 0x02, b"StarMesh-CK");
+        ck.zeroize();
+        self.send_chain_key = Some(next_ck);
         self.pq_step_counter += 1;
         Ok(mk)
     }
@@ -313,64 +420,248 @@ impl RatchetState {
     /// 3.3.1 Symmetric Ratchet receiving step
     /// CLAIM: Recovers the same message key as sender, advances chain key
     pub fn ratchet_decrypt(&mut self) -> Result<Key32, CryptoError> {
-        let ck = self.recv_chain_key.as_mut().ok_or(CryptoError::NoChainKey)?;
-        let mk = blake3_kdf(ck, 0x01, b"StarMesh-MK");
-        let next_ck = blake3_kdf(ck, 0x02, b"StarMesh-CK");
-        ck.copy_from_slice(&next_ck);
+        let mut ck = self.recv_chain_key.take().ok_or(CryptoError::NoChainKey)?;
+        let mk = blake3_kdf(&ck, 0x01, b"StarMesh-MK");
+        let next_ck = blake3_kdf(&ck, 0x02, b"StarMesh-CK");
+        ck.zeroize();
+        self.recv_chain_key = Some(next_ck);
         Ok(mk)
     }
 
     /// 3.3.3 PQ Ratchet initialization (Alice side)
-    pub fn pq_ratchet_init(&mut self) -> EncapsulationKey<MlKem768> {
+    pub fn pq_ratchet_init(&mut self) -> Result<RecoveryUpdateHeader, CryptoError> {
+        if self.outstanding_kems.len() >= KEM_BUFFER_CAPACITY {
+            return Err(CryptoError::BufferFull);
+        }
         let (ek, dk) = mlkem768_keygen();
-        self.pq_sk_local = Some(dk);
-        self.pq_pk_local = Some(ek.clone());
+        let sequence = self.next_kem_sequence;
+        self.next_kem_sequence += 1;
+        let kem_id = kem_id(&self.session_id, sequence, &ek);
+        if self.retired_kems.contains(&kem_id) {
+            return Err(CryptoError::DuplicateKemId);
+        }
+        let header_bytes = recovery_header_bytes(
+            &self.session_id,
+            &kem_id,
+            sequence,
+            sequence,
+            &self.transcript_hash,
+            &ek,
+        );
+        let signature = self.signing_key.sign(&header_bytes);
+        let header = RecoveryUpdateHeader {
+            session_id: self.session_id,
+            kem_id,
+            sequence,
+            epoch: sequence,
+            predecessor: self.transcript_hash,
+            pq_pk: ek,
+            identity_pk: self.signing_key.verifying_key().clone(),
+            signature,
+        };
+        self.outstanding_kems.insert(
+            kem_id,
+            OutstandingKem {
+                sequence,
+                secret_key: Some(dk),
+            },
+        );
         self.pq_step_counter = 0;
-        ek
+        Ok(header)
     }
 
     /// 3.3.3 PQ Ratchet encapsulation (Bob side)
     pub fn pq_ratchet_encapsulate(
         &mut self,
-        remote_pq_pk: &EncapsulationKey<MlKem768>,
-    ) -> Result<ml_kem::Ciphertext<MlKem768>, CryptoError> {
+        header: &RecoveryUpdateHeader,
+    ) -> Result<RecoveryUpdateResponse, CryptoError> {
+        self.validate_header(header)?;
+        if self.completed_kems.contains_key(&header.kem_id)
+            || self.retired_kems.contains(&header.kem_id)
+        {
+            return Err(CryptoError::DuplicateKemId);
+        }
         // encapsulate_with_rng returns (Ciphertext, SharedKey) — not a Result
-        let (ct, ss_pq) = remote_pq_pk.encapsulate_with_rng(&mut rand::rng());
-        self.mix_pq_secret(ss_pq.as_ref(), ct.as_ref())?;
-        Ok(ct)
+        let (ct, ss_pq) = header.pq_pk.encapsulate_with_rng(&mut rand::rng());
+        let mut shared_secret = [0u8; 32];
+        shared_secret.copy_from_slice(ss_pq.as_ref());
+        let ciphertext = <ml_kem::Ciphertext<MlKem768> as AsRef<[u8]>>::as_ref(&ct).to_vec();
+        self.completed_kems.insert(
+            header.kem_id,
+            CompletedKem {
+                sequence: header.sequence,
+                shared_secret,
+                ciphertext,
+            },
+        );
+        self.drain_completed()?;
+        Ok(RecoveryUpdateResponse {
+            header: header.kem_id,
+            ciphertext: ct,
+        })
     }
 
     /// 3.3.3 PQ Ratchet decapsulation (Alice side)
     /// The DecapsulationKey is consumed here — enforces one-time use and secret clearance.
-    /// SECURITY: Droppping pq_sk_local provides post-compromise security (Section 3.3.3)
-    pub fn pq_ratchet_decapsulate(&mut self, ct: &ml_kem::Ciphertext<MlKem768>) -> Result<(), CryptoError> {
-        let sk = self.pq_sk_local.take().ok_or(CryptoError::InvalidState)?;
+    /// SECURITY: Consuming the matching outstanding secret provides one-time decapsulation.
+    pub fn pq_ratchet_decapsulate(
+        &mut self,
+        response: &RecoveryUpdateResponse,
+    ) -> Result<(), CryptoError> {
+        let (sk, sequence) = {
+            let pending = self
+                .outstanding_kems
+                .get_mut(&response.header)
+                .ok_or(CryptoError::UnknownKemId)?;
+            (
+                pending
+                    .secret_key
+                    .take()
+                    .ok_or(CryptoError::DuplicateKemId)?,
+                pending.sequence,
+            )
+        };
         // decapsulate() is infallible in ML-KEM (implicit rejection per FIPS 203 §7.3)
-        let ss_pq = sk.decapsulate(ct);
-        self.mix_pq_secret(ss_pq.as_ref(), ct.as_ref())?;
-        // sk is dropped here, clearing the decapsulation key from memory (Zeroize via Drop)
+        let ss_pq = sk.decapsulate(&response.ciphertext);
+        let mut shared_secret = [0u8; 32];
+        shared_secret.copy_from_slice(ss_pq.as_ref());
+        let ciphertext =
+            <ml_kem::Ciphertext<MlKem768> as AsRef<[u8]>>::as_ref(&response.ciphertext).to_vec();
+        self.completed_kems.insert(
+            response.header,
+            CompletedKem {
+                sequence,
+                shared_secret,
+                ciphertext,
+            },
+        );
+        self.drain_completed()?;
         Ok(())
     }
 
-    fn mix_pq_secret(&mut self, ss_pq: &[u8], ciphertext: &[u8]) -> Result<(), CryptoError> {
+    fn validate_header(&self, header: &RecoveryUpdateHeader) -> Result<(), CryptoError> {
+        if header.session_id != self.session_id
+            || header.kem_id != kem_id(&header.session_id, header.sequence, &header.pq_pk)
+            || header.epoch != header.sequence
+            || header.sequence < self.next_kem_to_apply
+        {
+            return Err(CryptoError::InvalidHeader);
+        }
+        let bytes = recovery_header_bytes(
+            &header.session_id,
+            &header.kem_id,
+            header.sequence,
+            header.epoch,
+            &header.predecessor,
+            &header.pq_pk,
+        );
+        if !self.valid_predecessors.contains(&header.predecessor) {
+            return Err(CryptoError::InvalidHeader);
+        }
+        let identity = self
+            .trusted_identity
+            .as_ref()
+            .unwrap_or(&header.identity_pk);
+        if identity != &header.identity_pk {
+            return Err(CryptoError::AuthenticationFailed);
+        }
+        identity
+            .verify(&bytes, &header.signature)
+            .map_err(|_| CryptoError::AuthenticationFailed)
+    }
+
+    fn drain_completed(&mut self) -> Result<(), CryptoError> {
+        loop {
+            let next = self
+                .completed_kems
+                .iter()
+                .find(|(_, update)| update.sequence == self.next_kem_to_apply)
+                .map(|(id, _)| *id);
+            let Some(id) = next else {
+                return Ok(());
+            };
+            let update = self
+                .completed_kems
+                .remove(&id)
+                .ok_or(CryptoError::InvalidState)?;
+            self.mix_pq_secret(&id, &update.shared_secret, &update.ciphertext)?;
+            self.outstanding_kems.remove(&id);
+            self.retired_kems.insert(id);
+            self.next_kem_to_apply += 1;
+        }
+    }
+
+    fn mix_pq_secret(
+        &mut self,
+        kem_id: &KemId,
+        ss_pq: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<(), CryptoError> {
         let mut pool_info = b"StarMesh-EntropyPool".to_vec();
         pool_info.extend_from_slice(ciphertext);
         let next_pool = hkdf_derive(ss_pq, Some(&self.entropy_pool), &pool_info, 32)?;
         self.entropy_pool.copy_from_slice(&next_pool);
 
-        let out = hkdf_derive(ss_pq, Some(&next_pool), b"StarMesh-PQ-RK", 64)?;
+        let out = hkdf_derive(ss_pq, Some(&next_pool), b"StarMesh-PQ-RK", 96)?;
+        let mut old_root = self.root_key;
         self.root_key.copy_from_slice(&out[0..32]);
-        self.send_chain_key = Some({
-            let mut ck = [0u8; 32];
-            ck.copy_from_slice(&out[32..64]);
-            ck
-        });
+        old_root.zeroize();
+        let mut send = [0u8; 32];
+        let mut recv = [0u8; 32];
+        if self.is_initiator {
+            send.copy_from_slice(&out[32..64]);
+            recv.copy_from_slice(&out[64..96]);
+        } else {
+            send.copy_from_slice(&out[64..96]);
+            recv.copy_from_slice(&out[32..64]);
+        }
+        if let Some(mut old) = self.send_chain_key.take() {
+            old.zeroize();
+        }
+        if let Some(mut old) = self.recv_chain_key.take() {
+            old.zeroize();
+        }
+        self.send_chain_key = Some(send);
+        self.recv_chain_key = Some(recv);
+        let previous_transcript = self.transcript_hash;
+        let mut transcript = blake3::Hasher::new();
+        transcript.update(&self.transcript_hash);
+        transcript.update(kem_id);
+        transcript.update(ciphertext);
+        self.transcript_hash = *transcript.finalize().as_bytes();
+        self.valid_predecessors.insert(previous_transcript);
+        self.valid_predecessors.insert(self.transcript_hash);
         Ok(())
     }
 }
 
+impl Drop for RatchetState {
+    fn drop(&mut self) {
+        self.root_key.zeroize();
+        self.entropy_pool.zeroize();
+        self.transcript_hash.zeroize();
+        self.valid_predecessors.clear();
+        if let Some(mut key) = self.send_chain_key.take() {
+            key.zeroize();
+        }
+        if let Some(mut key) = self.recv_chain_key.take() {
+            key.zeroize();
+        }
+        for (_, mut key) in self.skipped_keys.drain() {
+            key.zeroize();
+        }
+        for (_, mut update) in self.completed_kems.drain() {
+            update.shared_secret.zeroize();
+        }
+        self.outstanding_kems.clear();
+    }
+}
+
 fn hex_str(bytes: &[u8]) -> String {
-    format!("{:02x}{:02x}{:02x}{:02x}...", bytes[0], bytes[1], bytes[2], bytes[3])
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}...",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    )
 }
 
 fn hr(title: &str) {
@@ -395,7 +686,7 @@ fn run() -> Result<(), CryptoError> {
     hr("Phase 1 — Key Generation");
 
     let alice_ik_dsa_pk = vec![0x42u8; 1952]; // Simulated ML-DSA-65 identity public key (1952 B)
-    let bob_ik_dsa_pk   = vec![0x24u8; 1952]; // Simulated ML-DSA-65 identity public key (1952 B)
+    let bob_ik_dsa_pk = vec![0x24u8; 1952]; // Simulated ML-DSA-65 identity public key (1952 B)
 
     // Alice long-term Classical keys
     let alice_ik_dh_sk = random_x25519_secret();
@@ -433,14 +724,24 @@ fn run() -> Result<(), CryptoError> {
 
     println!("  Alice's IK (DSA) pk: {}", hex_str(&alice_ik_dsa_pk));
     println!("  Bob's IK (DSA) pk  : {}", hex_str(&bob_ik_dsa_pk));
-    println!("  Bob's IK (DH) pk   : {}", hex_str(bob_bundle.ik_dh_pk.as_bytes()));
+    println!(
+        "  Bob's IK (DH) pk   : {}",
+        hex_str(bob_bundle.ik_dh_pk.as_bytes())
+    );
     // KeyExport::to_bytes() serializes the EncapsulationKey to its canonical byte form
-    println!("  Bob's PQ-SPK pk    : {}", hex_str(bob_bundle.pq_spk_pk.to_bytes().as_ref()));
+    println!(
+        "  Bob's PQ-SPK pk    : {}",
+        hex_str(bob_bundle.pq_spk_pk.to_bytes().as_ref())
+    );
 
     hr("Phase 2 — Hybrid PQ-X3DH Handshake");
 
     let (okm_alice, m0) = pq_x3dh_initiator(
-        &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
+        &alice_ik_dsa_pk,
+        &alice_ik_dh_sk,
+        &alice_ik_dh_pk,
+        &bob_ik_dsa_pk,
+        &bob_bundle,
     )?;
     println!("  Alice computes OKM: {}", hex_str(&okm_alice));
     println!(
@@ -461,6 +762,7 @@ fn run() -> Result<(), CryptoError> {
 
     let mut alice_state = RatchetState::new(&okm_alice, true);
     let mut bob_state = RatchetState::new(&okm_bob, false);
+    bob_state.set_trusted_identity(alice_state.identity_verifying_key());
 
     // Sync Bob's recv chain to Alice's initial send chain for the demo
     bob_state.recv_chain_key = alice_state.send_chain_key;
@@ -475,22 +777,37 @@ fn run() -> Result<(), CryptoError> {
 
     hr("Phase 4 — Post-Quantum Ratchet Step (Post-Compromise Security)");
 
-    println!("  Root key BEFORE PQ ratchet: {}", hex_str(&alice_state.root_key));
+    println!(
+        "  Root key BEFORE PQ ratchet: {}",
+        hex_str(&alice_state.root_key)
+    );
     println!("");
 
-    let alice_pq_pk = alice_state.pq_ratchet_init();
-    println!("  Alice generates ephemeral ML-KEM pk: {}", hex_str(alice_pq_pk.to_bytes().as_ref()));
+    let header = alice_state.pq_ratchet_init()?;
+    println!(
+        "  Alice generates authenticated ephemeral ML-KEM pk: {}",
+        hex_str(header.pq_pk.to_bytes().as_ref())
+    );
 
-    let ct_pq = bob_state.pq_ratchet_encapsulate(&alice_pq_pk)?;
-    println!("  Bob encapsulates → ct: {}", hex_str(ct_pq.as_ref()));
+    let response = bob_state.pq_ratchet_encapsulate(&header)?;
+    println!(
+        "  Bob encapsulates → ct: {}",
+        hex_str(response.ciphertext.as_ref())
+    );
 
-    alice_state.pq_ratchet_decapsulate(&ct_pq)?;
-    println!("  Alice decapsulates, updates RK, drops pq_sk_local.");
+    alice_state.pq_ratchet_decapsulate(&response)?;
+    println!("  Alice decapsulates, updates RK, and retires the KEM entry.");
     println!("");
 
-    assert_eq!(alice_state.root_key, bob_state.root_key, "❌ Root keys diverged");
-    println!("  ✅ Root keys converged: {}", hex_str(&alice_state.root_key));
-    println!("  [Security note] pq_sk_local = None → PCS recovery achieved.");
+    assert_eq!(
+        alice_state.root_key, bob_state.root_key,
+        "❌ Root keys diverged"
+    );
+    println!(
+        "  ✅ Root keys converged: {}",
+        hex_str(&alice_state.root_key)
+    );
+    println!("  [Security note] target KEM entry is retired and its secret is erased.");
 
     hr("Summary");
     println!("  Demonstrated constructions:");
@@ -498,7 +815,7 @@ fn run() -> Result<(), CryptoError> {
     println!("    ✔  HKDF binding with transcript: OKM = HKDF(SS_hybrid, 0^32, info, 64)");
     println!("    ✔  Symmetric ratchet:     MK = BLAKE3-KDF(CK, 0x01, info)");
     println!("    ✔  PQ ratchet update:     EP' = HKDF(SS_PQ, EP, 'EntropyPool'||ct); RK,CK = HKDF(SS_PQ, EP', 'StarMesh-PQ-RK', 64)");
-    println!("    ✔  Secret clearance:      pq_sk_local dropped after decapsulation");
+    println!("    ✔  Secret clearance:      outstanding KEM secret consumed after decapsulation");
 
     run_benchmarks()?;
     Ok(())
@@ -510,7 +827,7 @@ fn run_benchmarks() -> Result<(), CryptoError> {
 
     // Setup keys
     let alice_ik_dsa_pk = vec![0x42u8; 1952];
-    let bob_ik_dsa_pk   = vec![0x24u8; 1952];
+    let bob_ik_dsa_pk = vec![0x24u8; 1952];
     let alice_ik_dh_sk = random_x25519_secret();
     let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
     let bob_ik_dh_sk = random_x25519_secret();
@@ -542,7 +859,11 @@ fn run_benchmarks() -> Result<(), CryptoError> {
     for _ in 0..1000 {
         let start = std::time::Instant::now();
         let (_okm_alice, m0) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
+            &alice_ik_dsa_pk,
+            &alice_ik_dh_sk,
+            &alice_ik_dh_pk,
+            &bob_ik_dsa_pk,
+            &bob_bundle,
         )?;
         let _okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0)?;
         handshake_times.push(start.elapsed().as_nanos() as f64 / 1000.0);
@@ -556,14 +877,14 @@ fn run_benchmarks() -> Result<(), CryptoError> {
     let mut ratchet_times = Vec::with_capacity(1000);
     for _ in 0..1000 {
         let start = std::time::Instant::now();
-        let alice_pq_pk = alice_state.pq_ratchet_init();
-        let ct_pq = bob_state.pq_ratchet_encapsulate(&alice_pq_pk)?;
-        alice_state.pq_ratchet_decapsulate(&ct_pq)?;
+        let header = alice_state.pq_ratchet_init()?;
+        let response = bob_state.pq_ratchet_encapsulate(&header)?;
+        alice_state.pq_ratchet_decapsulate(&response)?;
         ratchet_times.push(start.elapsed().as_nanos() as f64 / 1000.0);
     }
 
     println!("  Micro-benchmark results (1,000 iterations):");
-    
+
     let print_stats = |name: &str, mut times: Vec<f64>| {
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let len = times.len();
@@ -583,7 +904,10 @@ fn run_benchmarks() -> Result<(), CryptoError> {
     };
 
     print_stats("PQ-X3DH Handshake (initiator + responder)", handshake_times);
-    print_stats("PQ Ratchet Round-trip (init + encaps + decaps)", ratchet_times);
+    print_stats(
+        "PQ Ratchet Round-trip (init + encaps + decaps)",
+        ratchet_times,
+    );
 
     Ok(())
 }
@@ -619,7 +943,7 @@ mod tests {
     #[test]
     fn test_pq_x3dh_handshake() {
         let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk   = vec![0x24u8; 1952];
+        let bob_ik_dsa_pk = vec![0x24u8; 1952];
 
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
@@ -653,10 +977,16 @@ mod tests {
         };
 
         let (okm_alice, m0) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
-        ).expect("Handshake failed");
+            &alice_ik_dsa_pk,
+            &alice_ik_dh_sk,
+            &alice_ik_dh_pk,
+            &bob_ik_dsa_pk,
+            &bob_bundle,
+        )
+        .expect("Handshake failed");
 
-        let okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0).expect("Handshake failed");
+        let okm_bob =
+            pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0).expect("Handshake failed");
 
         assert_eq!(okm_alice, okm_bob);
     }
@@ -681,13 +1011,91 @@ mod tests {
         let mut alice_state = RatchetState::new(&[1u8; 64], true);
         let mut bob_state = RatchetState::new(&[1u8; 64], false);
         bob_state.recv_chain_key = alice_state.send_chain_key;
+        bob_state.set_trusted_identity(alice_state.identity_verifying_key());
 
-        let alice_pq_pk = alice_state.pq_ratchet_init();
-        let ct_pq = bob_state.pq_ratchet_encapsulate(&alice_pq_pk).expect("Ratchet failed");
-        alice_state.pq_ratchet_decapsulate(&ct_pq).expect("Ratchet failed");
+        let header = alice_state.pq_ratchet_init().expect("Ratchet failed");
+        let response = bob_state
+            .pq_ratchet_encapsulate(&header)
+            .expect("Ratchet failed");
+        alice_state
+            .pq_ratchet_decapsulate(&response)
+            .expect("Ratchet failed");
 
         assert_eq!(alice_state.root_key, bob_state.root_key);
-        assert!(alice_state.pq_sk_local.is_none());
+        assert!(alice_state.outstanding_kems.is_empty());
+    }
+
+    #[test]
+    fn test_concurrent_out_of_order_updates_and_bidirectional_chains() {
+        let mut alice = RatchetState::new(&[7u8; 64], true);
+        let mut bob = RatchetState::new(&[7u8; 64], false);
+        bob.recv_chain_key = alice.send_chain_key;
+        bob.set_trusted_identity(alice.identity_verifying_key());
+
+        let first = alice.pq_ratchet_init().expect("first init failed");
+        let second = alice.pq_ratchet_init().expect("second init failed");
+
+        let second_response = bob
+            .pq_ratchet_encapsulate(&second)
+            .expect("second encaps failed");
+        assert_eq!(
+            bob.next_kem_to_apply, 0,
+            "later update applied before predecessor"
+        );
+        let first_response = bob
+            .pq_ratchet_encapsulate(&first)
+            .expect("first encaps failed");
+        assert_eq!(
+            bob.next_kem_to_apply, 2,
+            "buffer did not drain in sequence order"
+        );
+
+        alice
+            .pq_ratchet_decapsulate(&second_response)
+            .expect("second decaps failed");
+        assert_eq!(
+            alice.next_kem_to_apply, 0,
+            "later response applied before predecessor"
+        );
+        alice
+            .pq_ratchet_decapsulate(&first_response)
+            .expect("first decaps failed");
+
+        assert_eq!(alice.root_key, bob.root_key);
+        assert_eq!(alice.next_kem_to_apply, 2);
+        assert!(alice.outstanding_kems.is_empty());
+
+        let alice_to_bob = alice.ratchet_encrypt().expect("Alice send failed");
+        let bob_received = bob.ratchet_decrypt().expect("Bob receive failed");
+        assert_eq!(alice_to_bob, bob_received);
+
+        let bob_to_alice = bob.ratchet_encrypt().expect("Bob send failed");
+        let alice_received = alice.ratchet_decrypt().expect("Alice receive failed");
+        assert_eq!(bob_to_alice, alice_received);
+    }
+
+    #[test]
+    fn test_recovery_header_authentication_is_verified() {
+        let mut alice = RatchetState::new(&[8u8; 64], true);
+        let mut bob = RatchetState::new(&[8u8; 64], false);
+        bob.set_trusted_identity(alice.identity_verifying_key());
+
+        let mut header = alice.pq_ratchet_init().expect("init failed");
+        let attacker = demo_signing_key();
+        let bytes = recovery_header_bytes(
+            &header.session_id,
+            &header.kem_id,
+            header.sequence,
+            header.epoch,
+            &header.predecessor,
+            &header.pq_pk,
+        );
+        header.signature = attacker.sign(&bytes);
+
+        assert!(matches!(
+            bob.pq_ratchet_encapsulate(&header),
+            Err(CryptoError::AuthenticationFailed)
+        ));
     }
 
     // ============================================================================
@@ -701,7 +1109,7 @@ mod tests {
     #[test]
     fn test_transcript_binding_changes_okm() {
         let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk   = vec![0x24u8; 1952];
+        let bob_ik_dsa_pk = vec![0x24u8; 1952];
 
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
@@ -725,19 +1133,32 @@ mod tests {
         };
 
         let (okm1, _m0_orig) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
-        ).expect("First handshake failed");
+            &alice_ik_dsa_pk,
+            &alice_ik_dh_sk,
+            &alice_ik_dh_pk,
+            &bob_ik_dsa_pk,
+            &bob_bundle,
+        )
+        .expect("First handshake failed");
 
         // Create a modified message with altered identity
         let mut alice_ik_dsa_pk_modified = alice_ik_dsa_pk.clone();
         alice_ik_dsa_pk_modified[0] ^= 0xFF;
 
         let (okm2, _m0_alt) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk_modified, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
-        ).expect("Second handshake failed");
+            &alice_ik_dsa_pk_modified,
+            &alice_ik_dh_sk,
+            &alice_ik_dh_pk,
+            &bob_ik_dsa_pk,
+            &bob_bundle,
+        )
+        .expect("Second handshake failed");
 
         // CLAIM: Different identity → different OKM
-        assert_ne!(okm1, okm2, "FAILED: Transcript binding — identity change did not affect OKM");
+        assert_ne!(
+            okm1, okm2,
+            "FAILED: Transcript binding — identity change did not affect OKM"
+        );
         println!("  ✅ Transcript binding verified: Modified identity changes OKM");
     }
 
@@ -751,13 +1172,18 @@ mod tests {
 
         let mk1 = alice_state.ratchet_encrypt().expect("First ratchet failed");
         let ck1_after = alice_state.send_chain_key.clone();
-        let mk2 = alice_state.ratchet_encrypt().expect("Second ratchet failed");
+        let mk2 = alice_state
+            .ratchet_encrypt()
+            .expect("Second ratchet failed");
 
         // CLAIM: Each ratchet produces unique, non-repeating message keys
         assert_ne!(mk1, mk2, "FAILED: Forward secrecy — same MK produced twice");
-        
+
         // CLAIM: Chain key is advanced and overwritten
-        assert_ne!(ck1_after, alice_state.send_chain_key, "FAILED: CK not advanced");
+        assert_ne!(
+            ck1_after, alice_state.send_chain_key,
+            "FAILED: CK not advanced"
+        );
         println!("  ✅ Forward secrecy verified: MKs are unique and non-repeating");
     }
 
@@ -771,20 +1197,37 @@ mod tests {
         bob_state.recv_chain_key = alice_state.send_chain_key;
 
         // Before decapsulation: secret key should exist
-        assert!(alice_state.pq_sk_local.is_none(), "pq_sk_local should start as None");
+        assert!(
+            alice_state.outstanding_kems.is_empty(),
+            "KEM buffer should start empty"
+        );
 
-        let alice_pq_pk = alice_state.pq_ratchet_init();
-        assert!(alice_state.pq_sk_local.is_some(), "pq_sk_local should be set after init");
+        let header = alice_state.pq_ratchet_init().expect("init failed");
+        assert_eq!(
+            alice_state.outstanding_kems.len(),
+            1,
+            "KEM entry should be buffered"
+        );
 
-        let ct_pq = bob_state.pq_ratchet_encapsulate(&alice_pq_pk).expect("Encaps failed");
-        alice_state.pq_ratchet_decapsulate(&ct_pq).expect("Decaps failed");
+        let response = bob_state
+            .pq_ratchet_encapsulate(&header)
+            .expect("Encaps failed");
+        alice_state
+            .pq_ratchet_decapsulate(&response)
+            .expect("Decaps failed");
 
         // After decapsulation: secret key must be dropped
-        assert!(alice_state.pq_sk_local.is_none(), "FAILED: pq_sk_local not erased after decapsulation");
+        assert!(
+            alice_state.outstanding_kems.is_empty(),
+            "FAILED: KEM entry not retired after decapsulation"
+        );
 
         // CLAIM: Attempting to use the key again should fail
-        let result = alice_state.pq_ratchet_decapsulate(&ct_pq);
-        assert!(result.is_err(), "FAILED: Decapsulation succeeded after key was dropped — PCS violated");
+        let result = alice_state.pq_ratchet_decapsulate(&response);
+        assert!(
+            result.is_err(),
+            "FAILED: Decapsulation succeeded after key was dropped — PCS violated"
+        );
 
         println!("  ✅ Post-Compromise Security verified: Secret key properly erased");
     }
@@ -795,7 +1238,7 @@ mod tests {
     #[test]
     fn test_hybrid_ss_consistency() {
         let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk   = vec![0x24u8; 1952];
+        let bob_ik_dsa_pk = vec![0x24u8; 1952];
 
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
@@ -828,14 +1271,21 @@ mod tests {
         // Run handshake 10 times
         for _ in 0..10 {
             let (okm_alice, m0) = pq_x3dh_initiator(
-                &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
-            ).expect("Alice failed");
+                &alice_ik_dsa_pk,
+                &alice_ik_dh_sk,
+                &alice_ik_dh_pk,
+                &bob_ik_dsa_pk,
+                &bob_bundle,
+            )
+            .expect("Alice failed");
 
-            let okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0)
-                .expect("Bob failed");
+            let okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0).expect("Bob failed");
 
             // CLAIM: Both parties compute identical OKM despite different computation paths
-            assert_eq!(okm_alice, okm_bob, "FAILED: OKM mismatch — hybrid SS concatenation broken");
+            assert_eq!(
+                okm_alice, okm_bob,
+                "FAILED: OKM mismatch — hybrid SS concatenation broken"
+            );
         }
 
         println!("  ✅ Hybrid SS Consistency verified: Alice and Bob compute identical OKM");
@@ -858,7 +1308,10 @@ mod tests {
         // CLAIM: BLAKE3-KDF is deterministic given same inputs
         let blake_out1 = blake3_kdf(&seed, 0x01, info);
         let blake_out2 = blake3_kdf(&seed, 0x01, info);
-        assert_eq!(blake_out1, blake_out2, "FAILED: BLAKE3-KDF not deterministic");
+        assert_eq!(
+            blake_out1, blake_out2,
+            "FAILED: BLAKE3-KDF not deterministic"
+        );
 
         println!("  ✅ KDF Determinism verified: Outputs are consistent");
     }
@@ -868,7 +1321,7 @@ mod tests {
     #[test]
     fn test_key_independence_across_sessions() {
         let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk   = vec![0x24u8; 1952];
+        let bob_ik_dsa_pk = vec![0x24u8; 1952];
 
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
@@ -895,15 +1348,23 @@ mod tests {
         let mut okms = Vec::new();
         for _ in 0..5 {
             let (okm, _m0) = pq_x3dh_initiator(
-                &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
-            ).expect("Handshake failed");
+                &alice_ik_dsa_pk,
+                &alice_ik_dh_sk,
+                &alice_ik_dh_pk,
+                &bob_ik_dsa_pk,
+                &bob_bundle,
+            )
+            .expect("Handshake failed");
             okms.push(okm);
         }
 
         // CLAIM: All OKMs should be different (with overwhelming probability)
         for i in 0..okms.len() {
-            for j in (i+1)..okms.len() {
-                assert_ne!(okms[i], okms[j], "FAILED: Two handshakes produced identical OKM");
+            for j in (i + 1)..okms.len() {
+                assert_ne!(
+                    okms[i], okms[j],
+                    "FAILED: Two handshakes produced identical OKM"
+                );
             }
         }
 
@@ -916,19 +1377,25 @@ mod tests {
     #[test]
     fn test_chain_key_advancement() {
         let mut state = RatchetState::new(&[1u8; 64], true);
-        
+
         let ck_initial = state.send_chain_key.clone();
         let _mk1 = state.ratchet_encrypt().expect("First ratchet failed");
         let ck_after_first = state.send_chain_key.clone();
 
         // CLAIM: CK must change
-        assert_ne!(ck_initial, ck_after_first, "FAILED: CK not advanced after first ratchet");
+        assert_ne!(
+            ck_initial, ck_after_first,
+            "FAILED: CK not advanced after first ratchet"
+        );
 
         let _mk2 = state.ratchet_encrypt().expect("Second ratchet failed");
         let ck_after_second = state.send_chain_key.clone();
 
         // CLAIM: CK continues to advance deterministically
-        assert_ne!(ck_after_first, ck_after_second, "FAILED: CK not advanced after second ratchet");
+        assert_ne!(
+            ck_after_first, ck_after_second,
+            "FAILED: CK not advanced after second ratchet"
+        );
 
         println!("  ✅ Chain Key Advancement verified: Keys advance deterministically");
     }
@@ -939,7 +1406,7 @@ mod tests {
     #[test]
     fn test_asymmetric_paths_converge() {
         let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk   = vec![0x24u8; 1952];
+        let bob_ik_dsa_pk = vec![0x24u8; 1952];
 
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
@@ -971,14 +1438,21 @@ mod tests {
         };
 
         let (okm_alice, m0) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk, &alice_ik_dh_sk, &alice_ik_dh_pk, &bob_ik_dsa_pk, &bob_bundle,
-        ).expect("Alice failed");
+            &alice_ik_dsa_pk,
+            &alice_ik_dh_sk,
+            &alice_ik_dh_pk,
+            &bob_ik_dsa_pk,
+            &bob_bundle,
+        )
+        .expect("Alice failed");
 
-        let okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0)
-            .expect("Bob failed");
+        let okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0).expect("Bob failed");
 
         // CLAIM: Different computation paths → identical OKM (commutative property)
-        assert_eq!(okm_alice, okm_bob, "FAILED: Asymmetric paths did not converge");
+        assert_eq!(
+            okm_alice, okm_bob,
+            "FAILED: Asymmetric paths did not converge"
+        );
         println!("  ✅ Asymmetric Path Convergence verified: Both parties arrive at same secret");
     }
 
@@ -1000,7 +1474,3 @@ mod tests {
         println!("  ✅ ML-KEM Implicit Rejection verified: Decapsulation succeeds (no error path)");
     }
 }
-
-
-
-

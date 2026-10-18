@@ -1,4 +1,4 @@
-.PHONY: help all paper python-poc rust-poc mixnet-sim verify clean
+.PHONY: help all paper paper-md python-poc rust-poc mixnet-sim verify clean
 
 PYTHON ?= python3
 VENV_DIR := .venv
@@ -8,7 +8,8 @@ help:
 	@echo "Star-Mesh research repository"
 	@echo ""
 	@echo "Targets:"
-	@echo "  make paper        Build the LaTeX manuscript"
+	@echo "  make paper        Build the LaTeX manuscript and Markdown export"
+	@echo "  make paper-md     Regenerate paper/paper.md from the LaTeX source"
 	@echo "  make python-poc   Run the Python protocol demonstration"
 	@echo "  make rust-poc     Run the Rust proof-of-concept"
 	@echo "  make mixnet-sim   Run the empirical mixnet queue simulation"
@@ -20,6 +21,10 @@ all: paper
 
 paper:
 	$(MAKE) -C paper all
+	$(MAKE) paper-md
+
+paper-md: paper/paper.tex paper/paper.aux convert.py
+	$(PYTHON) convert.py
 
 $(VENV_PYTHON):
 	$(PYTHON) -m venv $(VENV_DIR)
@@ -28,7 +33,7 @@ python-poc: $(VENV_PYTHON)
 	$(VENV_PYTHON) poc/python/poc.py
 
 rust-poc:
-	cargo run --manifest-path poc/rust/Cargo.toml
+	cargo run --release --manifest-path poc/rust/Cargo.toml
 
 mixnet-sim:
 	$(PYTHON) poc/python/mixnet_sim.py

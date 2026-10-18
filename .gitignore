@@ -6,7 +6,6 @@
 *.pyc
 *.pyo
 *.pyd
-/convert.py
 
 # LaTeX build outputs
 /paper/*.aux
@@ -38,4 +37,3 @@
 # Virtual environment
 .venv/
 .vscode/
-

@@ -1,0 +1,456 @@
+import re
+import os
+
+def load_aux(aux_path):
+    labels = {}
+    citations = {}
+    if not os.path.exists(aux_path):
+        print(f"Warning: {aux_path} not found.")
+        return labels, citations
+
+    with open(aux_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    for line in content.splitlines():
+        if line.startswith(r'\newlabel{'):
+            key_match = re.match(r'\\newlabel\{([^}]+)\}', line)
+            if key_match:
+                key = key_match.group(1)
+                rest = line[key_match.end():]
+                if rest.startswith('{{'):
+                    sub_arg = ''
+                    brace_count = 0
+                    idx = 1
+                    while idx < len(rest):
+                        char = rest[idx]
+                        if char == '{':
+                            brace_count += 1
+                        elif char == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                sub_arg = rest[2:idx]
+                                break
+                        idx += 1
+                    labels[key] = sub_arg
+        elif line.startswith(r'\bibcite{'):
+            cite_match = re.match(r'\\bibcite\{([^}]+)\}\{([^}]+)\}', line)
+            if cite_match:
+                key, num = cite_match.groups()
+                citations[key] = num
+
+    return labels, citations
+
+def convert_latex_to_md(tex_path, aux_path, md_path):
+    labels, citations = load_aux(aux_path)
+
+    with open(tex_path, 'r', encoding='utf-8') as f:
+        full_text = f.read()
+
+    # Step 1: Strip comment lines from full text
+    full_text = re.sub(r'^\s*%.*$', '', full_text, flags=re.MULTILINE)
+
+    # Step 2: Extract Title, Author, Date, Affiliations from preamble
+    preamble_end = full_text.find(r'\begin{document}')
+    if preamble_end != -1:
+        preamble_text = full_text[:preamble_end]
+    else:
+        preamble_text = full_text
+
+    title = ""
+    author = ""
+    date = ""
+    affil = []
+
+    title_match = re.search(r'\\title\{((?:[^{}]|\{[^{}]*\})*)\}', preamble_text, re.DOTALL)
+    if title_match:
+        title = title_match.group(1).replace(r'\textbf', '').replace(r'\\', ' ').strip()
+        title = re.sub(r'\{([^}]+)\}', r'\1', title)
+        title = re.sub(r'\s+', ' ', title)
+
+    author_match = re.search(r'\\author\{((?:[^{}]|\{[^{}]*\})*)\}', preamble_text, re.DOTALL)
+    if author_match:
+        author = author_match.group(1).strip()
+        author = re.sub(r'\\orcidlink\{[^}]+\}', '', author)
+        author = author.replace('~', ' ')
+        author = re.sub(r'\s+', ' ', author)
+
+    date_match = re.search(r'\\date\{((?:[^{}]|\{[^{}]*\})*)\}', preamble_text, re.DOTALL)
+    if date_match:
+        date = date_match.group(1).strip()
+
+    affil_matches = re.findall(r'\\affil\{((?:[^{}]|\{[^{}]*\})*)\}', preamble_text, re.DOTALL)
+    for aff in affil_matches:
+        cleaned_aff = aff.replace(r'\\', ',').replace(r'\texttt', '').strip()
+        cleaned_aff = re.sub(r'\{([^}]+)\}', r'\1', cleaned_aff)
+        cleaned_aff = re.sub(r'\s+', ' ', cleaned_aff)
+        affil.append(cleaned_aff)
+
+    # Macro definitions mapping
+    macros = {
+        r'\negl': r'\mathsf{negl}',
+        r'\Adv': r'\mathbf{Adv}',
+        r'\PGame': r'\mathbf{Game}',
+        r'\calA': r'\mathcal{A}',
+        r'\calB': r'\mathcal{B}',
+        r'\calS': r'\mathcal{S}',
+        r'\calK': r'\mathcal{K}',
+        r'\calO': r'\mathcal{O}',
+        r'\bits': r'\{0,1\}',
+        r'\getsr': r'\stackrel{\$}{\leftarrow}',
+        r'\MLKEM': r'\mathsf{ML\text{-}KEM}',
+        r'\MLDSA': r'\mathsf{ML\text{-}DSA}',
+        r'\HKDF': r'\mathsf{HKDF}',
+        r'\DHop': r'\mathsf{DH}',
+        r'\Encaps': r'\mathsf{Encaps}',
+        r'\Decaps': r'\mathsf{Decaps}',
+        r'\Sign': r'\mathsf{Sign}',
+        r'\Verify': r'\mathsf{Verify}',
+        r'\KeyGen': r'\mathsf{KeyGen}',
+    }
+
+    def expand_macros(text):
+        for macro, replacement in macros.items():
+            pattern = re.escape(macro) + r'(?![a-zA-Z])'
+            text = re.sub(pattern, lambda m, r=replacement: r, text)
+        text = re.sub(r'\\flen\{((?:[^{}]|\{[^{}]*\})*)\}', lambda m: f'\\mathsf{{len}}_{{32}}({m.group(1)})', text)
+        text = re.sub(r'\\Hgame\{((?:[^{}]|\{[^{}]*\})*)\}', lambda m: f'\\mathbf{{H}}_{{{m.group(1)}}}', text)
+        return text
+
+    def clean_text(text):
+        text = text.replace(r'\maketitle', '')
+        text = text.replace(r'\noindent', '')
+        text = text.replace(r'\newpage', '')
+
+        text = text.replace('~', ' ')
+        text = text.replace('---', '—')
+        text = text.replace('--', '–')
+        text = text.replace("``", '"').replace("''", '"')
+        text = text.replace(r'\,', ' ')
+        text = text.replace(r'\ ', ' ')
+        text = text.replace(r'\&', '&')
+        text = text.replace(r'\#', '#')
+        text = text.replace(r'\%', '%')
+
+        def cite_repl_simple(match):
+            keys = [k.strip() for k in match.group(1).split(',')]
+            links = []
+            for k in keys:
+                num = citations.get(k, k)
+                links.append(f"[{num}](#{k})")
+            return ", ".join(links)
+
+        text = re.sub(r'\\cite\{([^}]+)\}', cite_repl_simple, text)
+
+        def ref_repl(match):
+            key = match.group(1)
+            return labels.get(key, f"[{key}]")
+        text = re.sub(r'\\ref\{([^}]+)\}', ref_repl, text)
+
+        text = re.sub(r'\\emph\{((?:[^{}]|\{[^{}]*\})*)\}', lambda m: f'*{m.group(1)}*', text, flags=re.DOTALL)
+        text = re.sub(r'\\textbf\{((?:[^{}]|\{[^{}]*\})*)\}', lambda m: f'**{m.group(1)}**', text, flags=re.DOTALL)
+        text = re.sub(r'\\texttt\{((?:[^{}]|\{[^{}]*\})*)\}', lambda m: f'`{m.group(1)}`', text, flags=re.DOTALL)
+        text = re.sub(r'\\url\{([^}]+)\}', lambda m: f'[{m.group(1)}]({m.group(1)})', text)
+
+        text = text.replace(r"\'e", "é")
+        text = text.replace(r"\`e", "è")
+        text = text.replace(r"\`i", "ì")
+        text = text.replace(r"\`a", "à")
+        text = text.replace(r"\`o", "ò")
+        text = text.replace(r"\`u", "ù")
+        text = text.replace(r"\`es", "ès")
+
+        return text
+
+    doc_start = full_text.find(r'\begin{document}')
+    if doc_start != -1:
+        body_text = full_text[doc_start:]
+    else:
+        body_text = full_text
+
+    body_text = expand_macros(body_text)
+    body_text = clean_text(body_text)
+
+    lines = body_text.splitlines()
+
+    output = []
+
+    output.append(f"# {title}\n")
+    if author:
+        output.append(f"**Author:** {author}  ")
+    if affil:
+        output.append(f"**Affiliation:** {', '.join(affil)}  ")
+    if date:
+        output.append(f"**Date:** {date}  \n")
+
+    in_abstract = False
+    in_itemize = []
+    in_enumerate = []
+    enum_counters = []
+
+    sec_count = 0
+    subsec_count = 0
+    subsubsec_count = 0
+    theorem_count = 0
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        if line.strip() in (r'\begin{document}', r'\end{document}'):
+            i += 1
+            continue
+
+        if r'\begin{abstract}' in line:
+            in_abstract = True
+            output.append("## Abstract\n")
+            i += 1
+            continue
+        elif r'\end{abstract}' in line:
+            in_abstract = False
+            output.append("\n")
+            i += 1
+            continue
+
+        if in_abstract:
+            output.append(re.sub(r'\\label\{[^}]+\}', '', line.strip()) + " ")
+            i += 1
+            continue
+
+        # Headings
+        sec_match = re.match(r'\\section\*?\{([^}]+)\}', line)
+        if sec_match:
+            sec_name = sec_match.group(1)
+            sec_name = re.sub(r'\\label\{[^}]+\}', '', sec_name).strip()
+
+            if sec_name.lower() == "acknowledgements":
+                output.append(f"\n# Acknowledgements\n")
+            else:
+                sec_count += 1
+                subsec_count = 0
+                subsubsec_count = 0
+                theorem_count = 0
+                output.append(f"\n# {sec_count}. {sec_name}\n")
+            i += 1
+            continue
+
+        subsec_match = re.match(r'\\subsection\*?\{([^}]+)\}', line)
+        if subsec_match:
+            subsec_name = subsec_match.group(1)
+            subsec_name = re.sub(r'\\label\{[^}]+\}', '', subsec_name).strip()
+            subsec_count += 1
+            subsubsec_count = 0
+            output.append(f"\n## {sec_count}.{subsec_count} {subsec_name}\n")
+            i += 1
+            continue
+
+        subsubsec_match = re.match(r'\\subsubsection\*?\{([^}]+)\}', line)
+        if subsubsec_match:
+            subsubsec_name = subsubsec_match.group(1)
+            subsubsec_name = re.sub(r'\\label\{[^}]+\}', '', subsubsec_name).strip()
+            subsubsec_count += 1
+            output.append(f"\n### {sec_count}.{subsec_count}.{subsubsec_count} {subsubsec_name}\n")
+            i += 1
+            continue
+
+        # Paragraphs
+        paragraph_match = re.match(r'\\paragraph\{([^}]+)\}', line)
+        if paragraph_match:
+            para_name = paragraph_match.group(1)
+            para_name = re.sub(r'\\label\{[^}]+\}', '', para_name).strip()
+            output.append(f"\n**{para_name}**\n")
+            i += 1
+            continue
+
+        # Theorem environments begins
+        env_begin_match = re.match(r'\\begin\{(definition|theorem|securityclaim|lemma|corollary|proposition|remark|assumption)\}(\[[^\]]+\])?', line)
+        if env_begin_match:
+            env_type = env_begin_match.group(1)
+            env_name = env_begin_match.group(2)
+
+            env_label = None
+            for idx in range(i, min(i+10, len(lines))):
+                lbl_match = re.search(r'\\label\{([^}]+)\}', lines[idx])
+                if lbl_match:
+                    env_label = lbl_match.group(1)
+                    break
+
+            theorem_count += 1
+            env_num = f"{sec_count}.{theorem_count}"
+
+            env_title_display = env_type.replace('securityclaim', 'Security Claim').capitalize()
+
+            name_str = ""
+            if env_name:
+                name_str = f" ({env_name[1:-1]})"
+
+            anchor = f"<a id=\"{env_label}\"></a>" if env_label else ""
+            output.append(f"\n> {anchor}**{env_title_display} {env_num}{name_str}.** ")
+            i += 1
+            continue
+
+        env_end_match = re.match(r'\\end\{(definition|theorem|securityclaim|lemma|corollary|proposition|remark|assumption)\}', line)
+        if env_end_match:
+            output.append("\n")
+            i += 1
+            continue
+
+        # Proof environment
+        proof_begin_match = re.match(r'\\begin\{proof\}(\[[^\]]+\])?', line)
+        if proof_begin_match:
+            proof_title = proof_begin_match.group(1)
+            if proof_title:
+                title_str = proof_title[1:-1]
+                output.append(f"\n*{title_str}.* ")
+            else:
+                output.append(f"\n_Proof Sketch._ ")
+            i += 1
+            continue
+
+        if r'\end{proof}' in line:
+            output.append(f" $\\square$\n")
+            i += 1
+            continue
+
+        if r'\tableofcontents' in line:
+            i += 1
+            continue
+
+        # Lists
+        if r'\begin{itemize}' in line:
+            in_itemize.append(True)
+            i += 1
+            continue
+        elif r'\end{itemize}' in line:
+            if in_itemize:
+                in_itemize.pop()
+            i += 1
+            continue
+
+        if r'\begin{enumerate}' in line:
+            in_enumerate.append(True)
+            enum_counters.append(1)
+            i += 1
+            continue
+        elif r'\end{enumerate}' in line:
+            if in_enumerate:
+                in_enumerate.pop()
+                enum_counters.pop()
+            i += 1
+            continue
+
+        if r'\item' in line:
+            cleaned_item = re.sub(r'\\label\{[^}]+\}', '', line.replace(r'\item', '').strip())
+            indent = "  " * (len(in_itemize) + len(in_enumerate) - 1)
+            if in_enumerate:
+                cnt = enum_counters[-1]
+                output.append(f"{indent}{cnt}. {cleaned_item}")
+                enum_counters[-1] += 1
+            else:
+                output.append(f"{indent}- {cleaned_item}")
+            i += 1
+            continue
+
+        # Math blocks
+        if line.strip() == r'\[':
+            math_lines = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != r'\]':
+                math_lines.append(lines[i].strip())
+                i += 1
+            math_content = " ".join(math_lines)
+            output.append(f"\n$$\n{math_content}\n$$\n")
+            i += 1
+            continue
+
+        # align* environment
+        if r'\begin{align*}' in line:
+            math_lines = []
+            i += 1
+            while i < len(lines) and r'\end{align*}' not in lines[i]:
+                math_lines.append(lines[i].strip())
+                i += 1
+            math_content = "\n".join(math_lines)
+            output.append(f"\n$$\n\\begin{{aligned}}\n{math_content}\n\\end{{aligned}}\n$$\n")
+            i += 1
+            continue
+
+        # Hardcode Table replacements to keep them perfect
+        if r'\begin{table}' in line:
+            table_lines = []
+            while i < len(lines) and r'\end{table}' not in lines[i]:
+                table_lines.append(lines[i])
+                i += 1
+            table_lines.append(lines[i])
+            table_text = "".join(table_lines)
+
+            if "tab:primitives" in table_text:
+                md_table = """
+| Primitive | Public Key | Ciphertext / DH Output | Shared Secret |
+| :--- | :--- | :--- | :--- |
+| X25519 | 32 B | 32 B | 32 B |
+| ML-KEM-768 | 1184 B | 1088 B | 32 B |
+| ML-DSA-65 | 1952 B | N/A (sig: 3,309 B) | N/A |
+
+*Table 1: Primitive sizes relevant to Star-Mesh.*
+"""
+                output.append(md_table)
+            elif "tab:overhead" in table_text:
+                md_table = """
+| Component | Classical (Signal) | Star-Mesh | Overhead |
+| :--- | :--- | :--- | :--- |
+| Handshake, with OTPK (bytes) | $\\approx 150$ [4](#marlinspike_x3dh) | $\\approx 4,224$ | $+4,074$ |
+| Handshake, SPK-only fallback | $\\approx 118$ [4](#marlinspike_x3dh) | $\\approx 3,136$ | $+3,018$ |
+| Ratchet header (non-PQ step) | 32 (X25519 pk) | 32 (X25519 pk) | 0 |
+| Ratchet header (PQ step) | N/A | $+1,184$ (KEM pk) | $+1,184$ |
+| Ratchet reply (PQ step) | N/A | $+1,088$ (KEM ct) | $+1,088$ |
+
+*Table 2: Bandwidth overhead comparison. Classical Signal handshake size is derived from the X3DH specification [4](#marlinspike_x3dh): two 32-byte X25519 public keys (IK and EK), one 32-byte SPK, one 32-byte OTPK, and protocol framing, totalling approximately 150 bytes (118 bytes without an OTPK). Star-Mesh handshake figures follow the $M_0$ definition of Section 3.4: $IK^{DSA}_{pk,A}$ (1,952 B) $+$ $IK^{DH}_{pk,A}$ (32 B) $+$ $EK_{pk,A}$ (32 B) $+$ $ct_1$ (1,088 B) $+$ optionally $ct_2$ (1,088 B) $+$ $\\approx$32 B framing/identifiers. The 1,952-byte $IK^{DSA}_{pk,A}$ is transmitted on every handshake as specified; implementations that cache a correspondent's identity key after first contact can amortise this cost across a relationship rather than a session.*
+"""
+                output.append(md_table)
+            i += 1
+            continue
+
+        # Bibliography
+        if r'\begin{thebibliography}' in line:
+            output.append("\n# References\n")
+            i += 1
+            continue
+        elif r'\end{thebibliography}' in line:
+            i += 1
+            continue
+
+        if r'\bibitem{' in line:
+            bib_match = re.match(r'\\bibitem\{([^}]+)\}', line)
+            if bib_match:
+                bib_key = bib_match.group(1)
+                bib_num = citations.get(bib_key, "?")
+
+                bib_text_lines = []
+                i += 1
+                while i < len(lines) and not lines[i].strip().startswith(r'\bibitem') and not lines[i].strip().startswith(r'\end{thebibliography}'):
+                    bib_text_lines.append(lines[i].strip())
+                    i += 1
+
+                bib_text = " ".join(bib_text_lines)
+                bib_text = re.sub(r'\\label\{[^}]+\}', '', bib_text)
+
+                output.append(f"\n{bib_num}. <a id=\"{bib_key}\"></a>{bib_text}\n")
+                continue
+
+        cleaned_line = re.sub(r'\\label\{[^}]+\}', '', line)
+        output.append(cleaned_line)
+        i += 1
+
+    final_content = "\n".join(output)
+    final_content = re.sub(r'\n{3,}', '\n\n', final_content)
+
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write(final_content)
+
+    print(f"Successfully converted {tex_path} to {md_path}")
+
+if __name__ == "__main__":
+    tex = "paper/paper.tex"
+    aux = "paper/paper.aux"
+    md = "paper/paper.md"
+    convert_latex_to_md(tex, aux, md)

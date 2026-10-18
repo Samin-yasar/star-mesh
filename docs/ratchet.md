@@ -17,8 +17,9 @@ struct RatchetState {
     dh_pk_remote: x25519::PublicKey,// Current remote DH public
     
     // Post-Quantum Keys
-    pq_sk_local: Option<ml_kem::SecretKey>, // Ephemeral PQ secret for decapsulation
-    pq_pk_remote: ml_kem::PublicKey,        // Remote's ephemeral PQ public key
+    pq_outstanding: map<KemId, OutstandingKem>, // One secret per in-flight update
+    pq_completed: map<KemId, CompletedKem>,     // Responses waiting for ordered application
+    pq_retired: set<KemId>,                     // Replay protection
     
     // Counters and Metadata
     n_s: u32,                       // Number of messages sent in current DH ratchet
@@ -37,8 +38,9 @@ Upon successful completion of the PQ-X3DH handshake, the state is initialized us
 
 - **Root Key:** `state.root_key = OKM[0..32]`
 - **Chain Keys:** 
-  - If Initiator (Alice): `state.send_chain_key = OKM[32..64]`, `state.recv_chain_key` remains empty until Bob's first reply.
-  - If Responder (Bob): `state.recv_chain_key = OKM[32..64]`, `state.send_chain_key` initialized upon Bob's first reply.
+  - If Initiator (Alice): `state.send_chain_key = OKM[32..64]`.
+  - If Responder (Bob): `state.recv_chain_key = OKM[32..64]`.
+  - The peer's initial receive chain is installed during authenticated session setup.
 - **PQ Keys:** Initialized from the `PQ_OTPK` used in the handshake.
 
 ## 3. Symmetric-Key Chain Ratchet
@@ -53,11 +55,15 @@ The PQ Ratchet ensures security recovery against $Adv_{Quant}$.
 
 - **Trigger:** Triggered when `pq_counter >= 50` OR session time exceeds 24 hours.
 - **Process:**
-  1.  **Initiation:** Alice generates a fresh `ml_kem::KeyGen()` pair. She stores `pq_sk_local` and sends `pq_pk_local` in the message header.
+  1.  **Initiation:** Alice generates a fresh ML-KEM pair, allocates `kem_id`, and signs
+      `session_id || kem_id || sequence || epoch || predecessor_transcript || pq_pk` with ML-DSA.
+      The secret is stored under `kem_id`.
   2.  **Response:** Upon receiving `pq_pk_local`, Bob performs `Encaps(pq_pk_local)`, deriving `(ct, SS_PQ)`.
-  3.  **Key Update:** Both parties update the `root_key`:
-      $$ RK_{new},\; CK_{new} = \text{HKDF-SHA3-256}(SS_{PQ},\; salt = RK_{old},\; info = \text{"StarMesh-PQ-RK"},\; \ell = 64) $$
-  4.  **Replacement:** The new `root_key` replaces the old one. The old `pq_sk_local` is shredded.
+  3.  **Key Update:** Both parties update the `root_key` and both directional chain keys:
+      $$ RK_{new},\; CK_{new} = \text{HKDF-SHA3-256}(SS_{PQ},\; salt = RK_{old},\; info = \text{"StarMesh-PQ-RK"},\; \ell = 96) $$
+      The 96 bytes are root, initiator-to-responder chain, and responder-to-initiator chain.
+  4.  **Replacement:** The KEM secret is consumed exactly once and the identifier is moved to
+      `pq_retired`. A second response for the identifier is rejected.
 
 ## 5. Message Key Derivation and Header
 The message header must provide enough info for the receiver to synchronize the state without leaking identity.
@@ -89,6 +95,24 @@ To maintain the **Forward Secrecy** claims, the following deletion schedule is m
 - **Message Keys ($MK$):** Deleted immediately after one-time use (encryption or decryption).
 - **Chain Keys ($CK$):** Deleted as soon as the next chain key is derived.
 - **Root Key ($RK$):** Deleted as soon as a DH or PQ ratchet updates it.
-- **PQ Secret Keys ($PQ\_sk$):** Alice deletes $PQ\_sk_{local}$ immediately after decapsulating Bob's response `pq_ct`.
+- **PQ Secret Keys ($PQ\_sk$):** One secret is stored per outstanding `kem_id` and consumed
+  before decapsulation completes; it is then dropped and zeroized.
 - **Skipped Keys:** Deleted after use OR after a 7-day TTL (Time-To-Live).
 - **Session State:** If a session is closed or a node is "logged out," the entire `RatchetState` must be zeroized using the `zeroize` crate to prevent cold-boot attacks.
+
+## 8. Implementation-to-theorem correspondence
+
+| Theorem transition | Rust transition |
+|---|---|
+| authenticated send | `RatchetState::pq_ratchet_init` |
+| authenticated delivery/encapsulation | `RatchetState::pq_ratchet_encapsulate` |
+| exactly-once decapsulation | `RatchetState::pq_ratchet_decapsulate` |
+| deterministic concurrent application | `RatchetState::drain_completed` |
+| KEM secret erasure | `OutstandingKem.secret_key.take()` and `Drop` |
+| root/chain deletion | `mix_pq_secret` replaces and zeroizes old keys |
+| replay exclusion | `retired_kems` |
+
+The executable correspondence is tested by
+`test_concurrent_out_of_order_updates_and_bidirectional_chains` and
+`test_recovery_header_authentication_is_verified`. It is not a mechanically verified
+refinement proof.

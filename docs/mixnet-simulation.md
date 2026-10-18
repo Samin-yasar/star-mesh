@@ -34,3 +34,20 @@ Loopix anonymity theorem or replace an event-driven network experiment.
 The simulator also reports packet-size violations directly. Changing `--mtu`,
 `--base-payload`, or `--sphinx-overhead` is useful for testing whether a proposed payload format
 still fits the constant-size packet budget.
+
+## Queueing Dynamics and Saturation Mechanism
+
+In the simulation results (e.g. Table 1 in the paper), delivery collapses sharply between offered load $\lambda = 5$ and $\lambda = 20$ pkts/slot (falling from $99.9\%$ to $33.0\%$). This drop is an expected queueing artifact of the simulation parameters rather than a protocol flaw:
+
+- **Ingress Traffic:** Each slot generates $\text{Poisson}(\lambda)$ application packets and $\text{Poisson}(\lambda_{\mathrm{cover}})$ cover packets. With the default `cover_rate = load`, the total ingress arrival rate is $2\lambda$.
+- **Hop Demand:** Each packet traverses $H = 3$ mix hops. Consequently, every arriving packet demands 3 independent forwarding operations across the network, creating an aggregate service demand of $3 \times 2\lambda = 6\lambda$ packet-services per slot.
+- **Network Service Capacity:** With $N = 30$ mix nodes and a service capacity $C = 2$ packets/node/slot, the network's maximum aggregate service throughput is strictly $N \times C = 60$ packet-services per slot.
+- **Utilization Breakdown:**
+  - At $\lambda = 5$: Service demand is $30$ pkts/slot ($50\%$ network utilization, $\rho = 0.50$). Queues remain stable and clear quickly (p95 delay is 4 slots).
+  - At $\lambda = 10$: Service demand is $60$ pkts/slot ($100\%$ network utilization, $\rho = 1.0$). This represents the queue saturation boundary; queues grow and delay increases to p95 = 152 slots.
+  - At $\lambda = 20$: Service demand is $120$ pkts/slot ($200\%$ overload, $\rho = 2.0$). Arrivals arrive at twice the rate the network can process them. Queues grow monotonically throughout the 5,000-slot run, and packets remaining unserved in node queues when the run finishes are tallied as undelivered.
+
+## Slot Calibration Note
+
+The discrete-event simulation models time in abstract "slots" rather than physical milliseconds. In production mixnets (such as Loopix or Nym), mix nodes run as high-throughput servers capable of processing thousands of Sphinx packets per second per node, and per-hop Poisson delay parameters are tuned to physical millisecond distributions. Thus, the $C = 2$ capacity limit and discrete slot progression are benchmarking abstractions to verify packet sizes and queue behavior under controlled stress, not upper bounds on Star-Mesh's real-world throughput.
+
