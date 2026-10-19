@@ -142,7 +142,7 @@ an already exposed skipped key, the bound is
   \;\leq\;&
   Q_{\mathrm{sess}}Q_{\mathrm{upd}}Q_{\mathrm{KEM}}\,
   \Adv_{\mathrm{ML\text{-}KEM}}^{\mathrm{ind\text{-}cca2}}(\mathcal{B}_{\mathrm{KEM}})\\
-  &+ Q_{\mathrm{sess}}Q_{\mathrm{upd}}\,
+  &+ 2Q_{\mathrm{sess}}Q_{\mathrm{upd}}\,
   \Adv_{\mathrm{ML\text{-}DSA}}^{\mathrm{euf\text{-}cma}}(\mathcal{B}_{\mathrm{DSA}})\\
   &+ Q_{\mathrm{KDF}}\,\Adv_{\mathrm{KDF}}^{\mathrm{hi}}(\mathcal{C})
   + \negl(\lambda).
@@ -150,10 +150,11 @@ an already exposed skipped key, the bound is
 \]
 Here $Q_{\mathrm{sess}},Q_{\mathrm{upd}},Q_{\mathrm{KEM}},Q_{\mathrm{KDF}}$ are explicit
 polynomial query bounds defined in Section~\ref{sec:prelim}; $\Adv^{\mathrm{hi}}_{\mathrm{KDF}}$
-is the hidden-input KDF advantage defined there.  Before a fresh KEM update completes, a
-quantum adversary may recover at most the messages in the current classical-DH exposure window.
-The ratchet interval $\Delta$ therefore becomes a tunable systems parameter: it amortises KEM
-traffic while setting the maximum pre-recovery exposure per classical epoch.  The theorem is
+is the hidden-input KDF advantage under a uniform input defined there.  Before a fresh KEM update completes, a
+quantum adversary may recover at most the messages in the pre-recovery exposure window ($\Delta$
+messages of counter delay plus network round-trip latency, potentially unbounded if the peer is
+offline).  The ratchet interval $\Delta$ therefore becomes a tunable systems parameter: it amortises KEM
+traffic while setting the baseline pre-recovery exposure.  The theorem is
 about this recovery transition, rather than continuous post-quantum confidentiality or a
 complete UC realization.
 
@@ -240,9 +241,10 @@ Section~\ref{sec:assumptions}.
         delay, and out-of-order delivery.
   \item \textbf{Recovery game:} A freshness definition and PCS game that make RNG recovery,
         delivery completion, deletion, and pre-existing skipped-key exposure explicit.
-  \item \textbf{Exposure bound:} A conditional proof target for message keys derived after a
-        completed fresh KEM round-trip, together with a $\Delta$-message classical-DH exposure
-        window before recovery completes.
+  \item \textbf{Exposure analysis:} A conditional proof target for message keys derived after a
+        completed fresh KEM round-trip, together with an informal characterization of the
+        pre-recovery exposure window ($\Delta$ messages plus round-trip latency, unbounded if the
+        peer is offline) prior to recovery completion.
   \item \textbf{Executable correspondence:} A Rust prototype that exercises the concurrent
         buffer, authenticated headers, erasure, and bidirectional convergence, together with
         ProVerif models checking selected symbolic state-machine properties.
@@ -327,20 +329,22 @@ Section~\ref{sec:secmodel}).
 \begin{definition}[Hidden-input KDF advantage]
 \label{def:kdf-hi}
 For a KDF $F$, $\Adv^{\mathrm{hi}}_{F}(\mathcal C)$ is the distinguishing advantage of a
-QPT adversary $\mathcal C$ in the following game.  The challenger samples all public context
-values, chooses either a protocol-derived input $x_0$ satisfying the relevant freshness
-predicate or an independent uniform input $x_1\getsr\bits^{|x_0|}$, and returns
-$F(x_b,\mathit{salt},\mathit{info},\ell)$ together with the public context.  The adversary
-must not receive $x_b$, the secret salt, or any erased predecessor key.  Its advantage is
+QPT adversary $\mathcal C$ in the pure KDF game over a uniform hidden input:
+the challenger samples public context $(\mathit{salt}, \mathit{info})$, draws a secret uniform
+input $x \getsr \bits^{k}$ (where $k$ is the input key length), and computes the real output
+$y_0 = F(x,\mathit{salt},\mathit{info},\ell)$.  It also draws an independent uniform string
+$y_1 \getsr \bits^{\ell}$, chooses a challenge bit $b \getsr \{0,1\}$, and provides $(y_b,\mathit{salt},\mathit{info})$
+to $\mathcal C$.  The adversary $\mathcal C$ does not receive $x$.  Its advantage is
 \[
   \Adv^{\mathrm{hi}}_{F}(\mathcal C)
   \coloneqq
   \left|\Pr[b'=b]-\frac12\right|.
 \]
-For the theorem, this notation abbreviates the assumed composition of ML-KEM
-IND-CCA2 with HKDF/BLAKE3 domain separation; it is stronger and more directly applicable
-than an unqualified statement that an ordinary PRF remains pseudorandom when its key/input
-is replaced inside the protocol.
+In our security reductions, the IND-CCA2 reduction for ML-KEM first replaces the shared secret
+$SS_{\mathrm{PQ}}$ with a computationally uniform bitstring.  The $\Adv^{\mathrm{hi}}_{F}$ term then
+captures purely the PRF/extraction security of the KDF (HKDF-SHA3-256 and BLAKE3-KDF) when keyed
+with that uniform hidden input, isolating the KDF step and avoiding double-counting with the KEM
+IND-CCA2 advantage.
 \end{definition}
 
 \subsection{Key Encapsulation Mechanisms}
@@ -690,6 +694,11 @@ The PQ ratchet step is triggered when $\mathsf{pq\_step\_counter} = 0$ or on the
 of a new session.  The step is \emph{role-agnostic}: either party (call them the
 \emph{PQ-initiator} and the \emph{PQ-responder}) may trigger it when their counter expires.
 The party whose counter first reaches zero becomes the PQ-initiator for that round.
+In steady-state operation, $kem\_id$ and PQ records are authenticated within the session using
+the symmetric ratchet chain keys and AEAD framing.  When recovery from a state compromise is
+required (Section~\ref{sec:single-update-theorem}), asymmetric authentication via ML-DSA
+(\emph{UpdateAuth}) is applied to both the public key and ciphertext response to prevent
+adversary injection under a compromised symmetric state.
 
 \begin{enumerate}
   \item \textbf{Key Generation (PQ-initiator):} The PQ-initiator generates a fresh ML-KEM keypair
@@ -727,18 +736,20 @@ proceed in parallel.  Each completes independently; the result is two consecutiv
 root-key updates, which only strengthens the PCS guarantee.
 \end{remark}
 
-\begin{remark}[Justification of $\Delta = 50$ and CRQC Exposure Window]
+\begin{remark}[Pre-Recovery Exposure Window and Justification of $\Delta = 50$ (Informal)]
 \label{rem:delta}
 The parameter $\Delta$ governs the maximal interval between PQ ratchet steps.  Over this
 interval, session confidentiality against a CRQC relies solely on the X25519 DH ratchet.
 
-\textbf{Worst-case exposure bound.}  A CRQC that records the traffic can re-derive every
+\textbf{Pre-recovery exposure bound (informal).}  A CRQC that records the traffic can re-derive every
 X25519 ratchet step's output from the captured public ephemeral keys.  It therefore recovers
 \emph{all} message keys sent from the point of compromise until the PQ ratchet round-trip
 \emph{completes}—not merely the keys in one DH epoch.  The exposure window is thus bounded by
 the number of messages sent before: (i) the PQ-initiator emits a fresh $PQ^{loc}_{pk}$
 (delayed by up to $\Delta$ messages while the counter counts down), plus (ii) the network
 round-trip latency for the authenticated ciphertext reply to arrive and be accepted.
+Crucially, if the peer is offline or network packets are delayed or dropped, this window is
+unbounded in time until an authenticated round-trip successfully completes.
 Only after the full round-trip completes does the session re-enter the fresh state described
 by Theorem~\ref{thm:single-update-pcs}.
 
@@ -748,9 +759,10 @@ before the capture event.  The exposure is therefore bounded to messages sent \e
 the post-compromise window, not the entire session history.
 
 Choosing $\Delta = 50$ amortises the 1{,}184-byte ML-KEM public key cost over 50 messages
-while providing a concrete, tunable upper bound on the pre-recovery exposure count.  Operators
-with higher security requirements should reduce $\Delta$; those in low-latency environments
-should also account for round-trip time when estimating the actual window.
+while providing a concrete, tunable baseline on the pre-recovery exposure count.  Operators
+with higher security requirements should reduce $\Delta$; those in high-latency or asynchronous
+environments must also account for round-trip time and peer availability when estimating the
+actual exposure window.
 \end{remark}
 
 \subsubsection{Out-of-Order Message Handling}
@@ -900,16 +912,15 @@ BLAKE3's keyed hash mode follows from its design analysis \cite{blake3} and is c
 with standard-model PRF modeling of keyed sponge and tree-hash constructions.
 \end{assumption}
 
-\begin{assumption}[Hidden-input KDF composition]
+\begin{assumption}[Hidden-input KDF security]
 \label{asm:kdf-hi}
-For each post-recovery derivation in the target game, the composition of ML-KEM
-IND-CCA2 security, HKDF-SHA3-256, and the domain-separated BLAKE3-KDF satisfies the
-hidden-input game in Definition~\ref{def:kdf-hi}.  In particular, replacing the fresh
-ML-KEM shared secret by a uniform value permits replacement of the resulting entropy-pool,
-root, chain, and message-key outputs by uniform values, except with
-$\Adv^{\mathrm{hi}}_{\mathrm{KDF}}(\mathcal C)$.  This is the exact KDF assumption used by
-Theorem~\ref{thm:single-update-pcs}; an ordinary PRF statement alone is not being used as a
-surrogate for this composition step.
+HKDF-SHA3-256 and domain-separated BLAKE3 satisfy the hidden-input KDF security of
+Definition~\ref{def:kdf-hi}.  Specifically, given a uniform hidden input (established by the
+preceding ML-KEM IND-CCA2 reduction step), the outputs of the entropy-pool, root-key,
+chain-key, and message-key derivations are computationally indistinguishable from independent
+uniform strings, with distinguishing advantage at most $\Adv^{\mathrm{hi}}_{\mathrm{KDF}}(\mathcal C)$.
+This assumption isolates the PRF/expansion security of the key derivation chain from the
+underlying KEM CCA2 security, preventing double-counting between the two terms.
 \end{assumption}
 
 \begin{assumption}[DHT Availability and Sybil Resistance]
@@ -1074,15 +1085,25 @@ The protocol achieves \textbf{PCS} if $\Adv^{\mathrm{PCS}}_{\mathrm{SM}}(\calA) 
 
 The following theorem deliberately targets one authenticated recovery update rather than the
 complete decentralized protocol.  It makes explicit a condition that is necessary after state
-compromise: the fresh KEM public key cannot be authenticated only with a ratchet key that the
-adversary learned at $t_{\mathrm{comp}}$.  In the statement below, \emph{UpdateAuth} is an
-ML-DSA signature by the endpoint's identity key over
+compromise: neither the fresh KEM public key nor the responding ciphertext can be authenticated
+only with a ratchet key that the adversary learned at $t_{\mathrm{comp}}$.  In the statement below,
+\emph{UpdateAuth} consists of mutual ML-DSA signatures by the endpoints' long-term identity keys:
+the initiator signs
 \[
-  \mathsf{sid}\,\|\,\mathsf{kem\_id}\,\|\,PQ_{pk}\,\|\,\mathsf{epoch}\,\|\,\mathsf{prev},
+  \sigma_{\mathrm{init}} \gets \MLDSA.\Sign\bigl(IK^{DSA}_{sk,A},\;
+    \mathsf{sid}\,\|\,\mathsf{kem\_id}\,\|\,\strlit{init}\,\|\,PQ_{pk}\,\|\,\mathsf{epoch}\,\|\,\mathsf{prev}\bigr),
 \]
-where $\mathsf{prev}$ is the hash of the last accepted ratchet transcript.  A deployment may
-replace this signature with another authentication mechanism, but it must provide the same
-unforgeability guarantee and must not reveal its signing key in the compromise query.
+and the responder signs
+\[
+  \sigma_{\mathrm{resp}} \gets \MLDSA.\Sign\bigl(IK^{DSA}_{sk,B},\;
+    \mathsf{sid}\,\|\,\mathsf{kem\_id}\,\|\,\strlit{resp}\,\|\,ct\,\|\,\mathsf{epoch}'\,\|\,\mathsf{prev}'\bigr),
+\]
+where $\mathsf{prev}$ and $\mathsf{prev}'$ are hashes of the respective last accepted ratchet
+transcripts.  Authenticating both the KEM public key proposal and the responding ciphertext ensures
+that an adversary who possesses Bob's compromised ratchet state cannot answer Alice's $kem\_id$ with
+an independently encapsulated ciphertext whose shared secret the adversary knows.  A deployment may
+replace these signatures with another authentication mechanism, but it must provide the same
+unforgeability guarantee and must not reveal its signing keys in the compromise query.
 
 \paragraph{Oracle semantics.}
 For a fixed target session $\pi$ with endpoints $A$ and $B$, the challenger maintains
@@ -1114,9 +1135,15 @@ The target update $(\mathsf{kem\_id}^*,PQ_{pk}^*,ct^*)$ is fresh only if:
 \begin{enumerate}
   \item its KEM keypair is generated after $t_{\mathrm{rec}}$ with independent uniform
         randomness and no $\mathsf{RevealRNG}$ query covers that generation;
-  \item the update signature verifies under an identity key not returned by
-        $\mathsf{RevealLTK}$, and the signed $\mathsf{sid}$, $\mathsf{kem\_id}^*$,
-        $PQ_{pk}^*$, predecessor hash, and epoch are exactly those accepted by both endpoints;
+  \item both update messages are authenticated under identity keys not returned by
+        $\mathsf{RevealLTK}$: (a)~$\sigma_{\mathrm{init}}$ on
+        $(\mathsf{sid}, \mathsf{kem\_id}^*, \allowbreak \strlit{init}, \allowbreak PQ_{pk}^*, \allowbreak \mathsf{epoch}, \allowbreak \mathsf{prev})$
+        verifies under endpoint~$A$'s identity key;
+        (b)~$\sigma_{\mathrm{resp}}$ on
+        $(\mathsf{sid}, \mathsf{kem\_id}^*, \allowbreak \strlit{resp}, \allowbreak ct^*, \allowbreak \mathsf{epoch}', \allowbreak \mathsf{prev}')$
+        verifies under endpoint~$B$'s identity key;
+        and the signed session, identifier, public key, ciphertext, predecessor hashes, and epochs
+        are exactly those accepted by both endpoints;
   \item the matching ciphertext is delivered and decapsulated exactly once, after which the
         KEM secret, old root/chain keys, and any pre-update skipped keys are erased as specified;
   \item no $\mathsf{Corrupt}$ query occurs from target key generation through erasure of the
@@ -1135,7 +1162,7 @@ $\mathcal{A}$ be any QPT adversary making at most $Q_{\mathrm{sess}}$ session se
 $Q_{\mathrm{upd}}$ authenticated update attempts per session, $Q_{\mathrm{KEM}}$ KEM
 challenge-relevant encapsulations, and $Q_{\mathrm{KDF}}$ post-update KDF evaluations.
 Assume ML-KEM-768 is IND-CCA2 secure against QPT adversaries, ML-DSA-65 is EUF-CMA secure,
-and the hidden-input KDF composition of Assumption~\ref{asm:kdf-hi} holds.  If $\mathcal{A}$ has
+and the hidden-input KDF security of Assumption~\ref{asm:kdf-hi} holds.  If $\mathcal{A}$ has
 advantage $\epsilon_{\mathrm{PCS}}$ in the adaptive game above, then there exist QPT
 reductions $\mathcal{B}_{\mathrm{KEM}}$, $\mathcal{B}_{\mathrm{DSA}}$, and
 $\mathcal{B}_{\mathrm{KDF}}$ such that
@@ -1145,7 +1172,7 @@ $\mathcal{B}_{\mathrm{KDF}}$ such that
  \leq{}&
  Q_{\mathrm{sess}}Q_{\mathrm{upd}}Q_{\mathrm{KEM}}\,
        \Adv^{\mathrm{ind\text{-}cca2}}_{\MLKEM}(\mathcal{B}_{\mathrm{KEM}})
- +Q_{\mathrm{sess}}Q_{\mathrm{upd}}\,
+ +2Q_{\mathrm{sess}}Q_{\mathrm{upd}}\,
        \Adv^{\mathrm{euf\text{-}cma}}_{\MLDSA}(\mathcal{B}_{\mathrm{DSA}})\\
 &+Q_{\mathrm{KDF}}\,
        \Adv^{\mathrm{hi}}_{\mathrm{KDF}}(\mathcal{B}_{\mathrm{KDF}})
@@ -1165,19 +1192,24 @@ key as $PQ_{pk}^*$ and uses the challenge ciphertext as $ct^*$.  For all non-tar
 generates honest keys and answers $\mathsf{NetSend}$, corruption, and non-target reveal queries
 by running the real algorithms.  For the target update it uses the challenge shared secret
 $ss_b$ in both honest endpoint state transitions and never invokes decapsulation on $ct^*$.
-The freshness rules ensure that $\mathcal{A}$ cannot obtain the target KEM secret or force a
-forbidden decapsulation query.  If $b=0$, the simulation is the real game; if $b=1$, the
-target post-update root and chain keys are pseudorandom after the KDF hybrid.
+Because Bob's response ciphertext is authenticated under $IK^{DSA}_{pk,B}$ via $\sigma_{\mathrm{resp}}$,
+an adversary holding Bob's compromised ratchet state cannot substitute an independently encapsulated
+ciphertext without forging Bob's signature.  The freshness rules ensure that $\mathcal{A}$ cannot
+obtain the target KEM secret or force a forbidden decapsulation query.  If $b=0$, the simulation is
+the real game; if $b=1$, the target post-update root and chain keys are pseudorandom after the KDF hybrid.
 
 The DSA reduction answers all signing requests except the guessed target update using its
-signing oracle.  A target update accepted with a modified $\mathsf{sid}$, identifier, public
-key, predecessor, or epoch yields a new valid signature and therefore an EUF-CMA forgery.
+signing oracles for both endpoints.  A target update accepted with a modified $\mathsf{sid}$,
+identifier, public key, response ciphertext, predecessor, or epoch requires forging either
+$\sigma_{\mathrm{init}}$ under endpoint $A$'s identity key or $\sigma_{\mathrm{resp}}$ under
+endpoint $B$'s identity key, yielding an EUF-CMA forgery against ML-DSA-65 with loss bounded by
+$2 Q_{\mathrm{sess}} Q_{\mathrm{upd}}$.
 The KDF reduction replaces the post-update entropy-pool, root, chain, and message-key
-derivations one at a time.  There are at most $Q_{\mathrm{KDF}}$ such replacements; the
-triangle inequality gives the displayed sum.  Duplicate, reordered, and timed-out records
-cannot add a term: the retired-set and deterministic predecessor rule make them either
-reject or repeat an already accepted transition without changing state.  Dropped records
-simply prevent the freshness predicate from holding.
+derivations one at a time via the hidden-input KDF game over a uniform hidden input.  There are
+at most $Q_{\mathrm{KDF}}$ such replacements; the triangle inequality gives the displayed sum.
+Duplicate, reordered, and timed-out records cannot add a term: the retired-set and deterministic
+predecessor rule make them either reject or repeat an already accepted transition without changing
+state.  Dropped records simply prevent the freshness predicate from holding.
 \end{proof}
 
 % ============================================================
@@ -1357,7 +1389,7 @@ Theorem~\ref{thm:single-update-pcs}, whose bound is:
  \leq{}&
  Q_{\mathrm{sess}}Q_{\mathrm{upd}}Q_{\mathrm{KEM}}\,
        \Adv^{\mathrm{ind\text{-}cca2}}_{\MLKEM}(\mathcal{B}_{\mathrm{KEM}})
- +Q_{\mathrm{sess}}Q_{\mathrm{upd}}\,
+ +2Q_{\mathrm{sess}}Q_{\mathrm{upd}}\,
        \Adv^{\mathrm{euf\text{-}cma}}_{\MLDSA}(\mathcal{B}_{\mathrm{DSA}})\\
 &+Q_{\mathrm{KDF}}\,
        \Adv^{\mathrm{hi}}_{\mathrm{KDF}}(\mathcal{B}_{\mathrm{KDF}})
@@ -1366,9 +1398,10 @@ Theorem~\ref{thm:single-update-pcs}, whose bound is:
 \]
 The reduction in Theorem~\ref{thm:single-update-pcs} guesses the target session, update, and
 KEM branch, paying the joint factor $Q_{\mathrm{sess}}Q_{\mathrm{upd}}Q_{\mathrm{KEM}}$, and
-separately handles authenticated-header integrity via an EUF-CMA reduction losing
-$Q_{\mathrm{sess}}Q_{\mathrm{upd}}$.  The KDF hybrid pays $Q_{\mathrm{KDF}}$ by the
-triangle inequality.  Corollary~\ref{cor:pcs} records the qualitative healing statement;
+separately handles mutual update authenticity ($\sigma_{\mathrm{init}}$ and $\sigma_{\mathrm{resp}}$)
+via an EUF-CMA reduction losing $2Q_{\mathrm{sess}}Q_{\mathrm{upd}}$.  The KDF hybrid pays
+$Q_{\mathrm{KDF}}$ by the triangle inequality over the pure hidden-input KDF game.
+Corollary~\ref{cor:pcs} records the qualitative healing statement;
 quantitative PCS security is entirely captured by Theorem~\ref{thm:single-update-pcs}.
 \end{remark}
 
@@ -1439,8 +1472,14 @@ packets/slot, cover traffic rate $\lambda_{\mathrm{cover}} = 1.0$, and an advers
 fraction of $20\%$ ($f = 0.2$).  Category~3 ratchet packets contain a 1{,}184-byte ML-KEM public key
 or a 1{,}088-byte ciphertext, plus 192 bytes of application payload and 96 bytes of Sphinx framing,
 evaluated against a standard 1{,}500-byte MTU ($|pq\_pk| = 1{,}472$~B, $|pq\_ct| = 1{,}376$~B,
-normal packet $= 288$~B).  Table~\ref{tab:mixnet_sim} presents the empirical results across offered
-application loads $\lambda$ and node churn rates.
+normal packet $= 288$~B).  This simulation specifically measures \emph{steady-state} ratchet
+operations, where public keys and ciphertexts are authenticated symmetrically within the session
+without per-packet asymmetric signatures.  When an explicit post-compromise recovery signature
+(\emph{UpdateAuth}, adding 3{,}309 bytes for ML-DSA-65) is transmitted, the message exceeds the
+1{,}500-byte MTU ($|pq\_pk| + |\sigma_{\MLDSA}| \approx 4{,}493$~B; $|pq\_ct| + |\sigma_{\MLDSA}| \approx 4{,}397$~B)
+and is fragmented across 3 to 4 Sphinx packets; such recovery events occur only upon compromise or
+amortised every $\Delta$ messages.  Table~\ref{tab:mixnet_sim} presents the empirical results for
+steady-state traffic across offered application loads $\lambda$ and node churn rates.
 
 \begin{table}[ht]
 \centering
@@ -1541,6 +1580,7 @@ framing variations.  The 1{,}952-byte $IK^{DSA}_{pk,A}$ is transmitted on
 \emph{every} handshake as specified; implementations that cache a correspondent's identity
 key after first contact can amortise this cost across a relationship rather than a session.}
 \label{tab:overhead}
+\small
 \begin{tabular}{@{}llll@{}}
 \toprule
 \textbf{Component}               & \textbf{Classical (Signal)} & \textbf{Star-Mesh} & \textbf{Overhead} \\
@@ -1549,34 +1589,44 @@ key after first contact can amortise this cost across a relationship rather than
 Handshake, with OTPK (bytes)     & $\approx 150$ \cite{marlinspike_x3dh} & $\approx 4{,}256$ & $+4{,}106$ \\
 Handshake, SPK-only fallback     & $\approx 118$ \cite{marlinspike_x3dh} & $\approx 3{,}168$ & $+3{,}050$ \\
 Ratchet header (non-PQ step)     & 32 (X25519 pk)              & 32 (X25519 pk)     & $0$ \\
-Ratchet header (PQ step)         & N/A                         & $+1{,}184$ (KEM pk) & $+1{,}184$ \\
-Ratchet reply (PQ step)          & N/A                         & $+1{,}088$ (KEM ct) & $+1{,}088$ \\
+Ratchet step, unsigned (raw KEM pk)   & N/A                   & $+1{,}184$ (KEM pk) & $+1{,}184$ \\
+Ratchet reply, unsigned (raw KEM ct)  & N/A                   & $+1{,}088$ (KEM ct) & $+1{,}088$ \\
+Ratchet step, signed ($pk+\sigma_{\MLDSA}$) & N/A             & $+4{,}493$          & $+4{,}493$ \\
+Ratchet reply, signed ($ct+\sigma_{\MLDSA}$) & N/A            & $+4{,}397$          & $+4{,}397$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \paragraph{Amortised Cryptographic Cost.}
-The PQ ratchet step adds $1{,}184 + 1{,}088 = 2{,}272$ bytes per round-trip.  Let $\Delta = 50$
-be the ratchet interval.  The round-trip spans two independent directions: the ML-KEM-768 public key
-($|PQ\_pk| = 1{,}184$~B) is carried in Alice's outgoing messages amortised over $\Delta$ transmissions,
-and the corresponding ciphertext ($|PQ\_ct| = 1{,}088$~B) is returned in Bob's replies amortised over
-a further $\Delta$ receptions.  Computing the cryptographic per-message wire overhead averaged
-across both directions gives a divisor of $2\Delta$:\footnote{Equivalently, the per-message-in-one-direction
-cost is $|PQ\_pk|/\Delta = 23.68$~B outgoing and $|PQ\_ct|/\Delta = 21.76$~B incoming; the
-$2\Delta$ formulation is the symmetric average.}
-\[
-  \begin{aligned}
-    \text{Per-message PQ wire overhead}
-      &= \frac{|PQ\_pk| + |PQ\_ct|}{2\Delta} \\
-      &= \frac{1{,}184 + 1{,}088}{2 \times 50}
-      = 22.72 \;\text{bytes.}
-  \end{aligned}
-\]
-This $22.72$-byte figure is an exact, deterministic property of the ML-KEM-768 parameter specification
-under NIST FIPS 203.  The simulation in Section~\ref{sec:metadata} uses a 192-byte application
-payload; against that baseline the incremental cryptographic wire overhead is approximately
-$22.72/192 \approx 11.8\%$.  Against a 200-byte plaintext it is $11.4\%$.  Unless otherwise
-stated, the 192-byte baseline from the mixnet simulation is used as the reference throughout.
+The cryptographic overhead of the PQ ratchet depends directly on whether updates include asymmetric
+recovery signatures:
+\begin{enumerate}
+  \item \textbf{Signed Recovery Design (Theorem~\ref{thm:single-update-pcs}):} To achieve post-compromise
+        security against an adversary holding compromised symmetric ratchet state, both the initiator's
+        public key proposal and the responder's ciphertext reply must be authenticated under their long-term
+        identity keys via ML-DSA-65 signatures (\emph{UpdateAuth}, $3{,}309$~bytes each).  This adds
+        $1{,}184 + 3{,}309 = 4{,}493$~bytes for the initiator step and $1{,}088 + 3{,}309 = 4{,}397$~bytes
+        for the responder reply, totaling $8{,}890$~bytes per recovery round-trip.  Amortised across
+        both directions over interval $\Delta = 50$, the per-message wire overhead is:
+        \[
+          \frac{(|PQ\_pk| + |\sigma_{\MLDSA}|) + (|PQ\_ct| + |\sigma_{\MLDSA}|)}{2\Delta}
+          = \frac{8{,}890}{100}
+          = 88.90 \;\text{bytes/message.}
+        \]
+        Because each signed message exceeds a standard 1{,}500-byte MTU, each update message is
+        fragmented across 3 to 4 Sphinx mixnet packets at the transport layer.
+  \item \textbf{Unsigned / Symmetric Baseline:} In steady-state operation where messages are authenticated
+        via the symmetric ratchet chain and AEAD framing, the raw ML-KEM-768 key material adds
+        $1{,}184 + 1{,}088 = 2{,}272$~bytes per round-trip, yielding an amortised overhead of:
+        \[
+          \frac{|PQ\_pk| + |PQ\_ct|}{2\Delta}
+          = \frac{1{,}184 + 1{,}088}{100}
+          = 22.72 \;\text{bytes/message.}
+        \]
+        Against the 192-byte application baseline from Section~\ref{sec:metadata}, this raw overhead is
+        $22.72/192 \approx 11.8\%$, and each message fits comfortably within a single 1{,}500-byte MTU
+        without fragmentation.
+\end{enumerate}
 
 \paragraph{Decoupled Overlay and DHT Transport Overhead.}
 We emphasize an important architectural separation: the cryptographic ratchet wire overhead above is
@@ -1608,7 +1658,7 @@ However, network-layer transport costs cannot be represented as a static per-mes
 Consequently, a complete empirical accounting of network-level bandwidth under realistic churn and
 polling models requires high-fidelity network emulation (planned in our engineering roadmap),
 whereas the $22.72$ bytes/message reported here represents the invariant cryptographic overhead
-introduced by the post-quantum ratchet.
+introduced by the steady-state post-quantum ratchet without asymmetric signatures.
 
 \paragraph{Computational Cost.}
 ML-KEM-768 encapsulation and decapsulation execute in well under 1\,ms on modern hardware
@@ -1690,17 +1740,29 @@ We consolidate the protocol's assumptions and known limitations here for clarity
 \label{sec:related}
 % ============================================================
 
-\paragraph{Signal and PQXDH.}
-Signal's PQXDH \cite{signal_pqxdh} is the current industry standard for post-quantum initial
-key agreement.  It integrates Kyber into the X3DH handshake to provide PQ-FS against HNDL
-attacks, similarly to our PQ-X3DH.  However, PQXDH (i)~relies on centralized servers for key
-distribution and message routing, (ii)~does not integrate a post-quantum ratchet for ongoing
-sessions, and (iii)~uses Ed25519 (classical) for identity signatures, leaving identity
-authentication vulnerable to a CRQC.  Star-Mesh is designed to address all three gaps.
-The fundamental technical obstacle PQXDH does not confront is serverless pre-key distribution:
-moving post-quantum key bundles onto a decentralized DHT requires defending against eclipse
-and key-substitution attacks on multi-kilobyte PQ pre-key material without any trusted
-central arbiter, a problem that does not arise in Signal's centralized server model.
+\paragraph{Signal (PQXDH, SPQR) and Apple PQ3.}
+Signal's PQXDH \cite{signal_pqxdh} introduced post-quantum key encapsulation into the initial
+handshake to provide PQ-FS against HNDL attacks.  Both PQXDH and Star-Mesh's PQ-X3DH achieve
+asynchronous handshake completion by fetching pre-keys ahead of dialogue; what distinguishes
+Star-Mesh is that pre-keys are distributed over a decentralized, serverless Kademlia DHT rather than
+a trusted central server.  Under Apple's four-tier taxonomy of messaging security
+(Levels~0--3) \cite{imessage_pq3}, initial-handshake-only PQC represents Level~2.  Reaching Level~3
+requires post-quantum ratcheting throughout ongoing sessions.  Recently, Signal introduced the
+Sparse Post-Quantum Ratchet (SPQR / Triple Ratchet) \cite{signal_spqr,auerbach2025spqr}, which
+integrates ML-KEM-768 into the Double Ratchet by streaming 42-byte erasure-coded chunks across
+successive messages and overlapping ciphertext generation via the ``ML-KEM Braid.''  Similarly,
+Apple's iMessage PQ3 \cite{imessage_pq3} introduced periodic in-band ML-KEM re-keying into a
+centralized messaging service.
+
+In contrast to the centralized transport assumed by SPQR and PQ3, Star-Mesh targets a decentralized
+DHT and Sphinx mixnet setting.  Crucially, authentication in Star-Mesh is only partly post-quantum:
+the initial handshake message $M_0$ is not digitally signed, and its initiator authentication rests
+on classical $DH_1$; against a contemporaneous active CRQC during the initial handshake, $M_0$
+authentication remains classical.  Star-Mesh's post-quantum authentication specifically covers
+Bob's pre-key bundle (via an ML-DSA identity signature against DHT key substitution) and the
+post-compromise ratchet recovery updates (via mutual ML-DSA \emph{UpdateAuth} signatures,
+$\sigma_{\mathrm{init}}$ and $\sigma_{\mathrm{resp}}$), which are necessary to prevent an adversary
+holding compromised symmetric ratchet state from injecting adversarial ciphertexts during recovery.
 
 \paragraph{Session Protocol and Briar.}
 Session \cite{session_protocol} routes messages through an onion network to achieve metadata
@@ -1782,22 +1844,24 @@ artifact is a state machine for authenticated ML-KEM exchanges under delay, loss
 replay, and out-of-order delivery, together with a freshness game that makes RNG recovery and
 secret deletion explicit.  This view turns recovery into a measurable transition: after
 compromise, a cleanly generated ML-KEM keypair and a completed authenticated round-trip yield
-fresh post-recovery message keys, while the messages sent before completion occupy a bounded
-classical-DH exposure window.  The parameter $\Delta$ exposes the design trade-off directly:
+fresh post-recovery message keys, while the messages sent before completion occupy an exposure window
+governed by $\Delta$ messages of counter delay plus network round-trip latency (unbounded if the peer is offline).
+The parameter $\Delta$ exposes the design trade-off directly:
 smaller intervals shorten pre-recovery exposure, while larger intervals amortise KEM traffic.
 
 The resulting theorem has explicit delivery and implementation assumptions and targets the
-recovery transition itself.  ML-DSA authenticates the signed bundle; X25519 remains a classical
-hybrid component, while ML-KEM supplies the recovery contribution against a quantum-capable
-adversary.  The Rust prototype exercises the concurrent implementation state machine and the
-ProVerif models check selected symbolic invariants.  The cryptographic KEM-ratchet wire-cost
-estimate is $22.72$ amortised bytes per message at $\Delta=50$; it excludes overlay maintenance
-and routing traffic.
+recovery transition itself.  ML-DSA authenticates the signed bundle and the recovery update;
+X25519 remains a classical hybrid component, while ML-KEM supplies the recovery contribution
+against a quantum-capable adversary.  The Rust prototype exercises the concurrent implementation
+state machine and the ProVerif models check selected symbolic invariants.  The cryptographic
+KEM-ratchet wire-cost estimate is $22.72$ amortised bytes per message at $\Delta=50$ for steady-state
+exchange; it excludes overlay maintenance, routing traffic, and per-recovery ML-DSA authentication
+signatures.
 
 Key assumptions underlying the pairwise recovery bound are: Module-LWE hardness
 (Assumption~\ref{asm:mlwe}), ML-DSA unforgeability (Assumption~\ref{asm:mldsa}), the deletion
 schedule being enforced by the implementation (Assumption~\ref{asm:deletion}), a clean RNG from
-$t_{rec}$ onward (Assumption~\ref{asm:rng}), and the hidden-input KDF composition
+$t_{rec}$ onward (Assumption~\ref{asm:rng}), and the hidden-input KDF security over uniform input
 (Assumption~\ref{asm:kdf-hi}).  The DHT availability and mixnet assumptions are relevant only
 to deployment-context discussions and do not enter the pairwise confidentiality theorem.
 
@@ -1846,6 +1910,23 @@ Signal Foundation.
 \emph{The PQXDH Key Agreement Protocol}.
 Technical Report, 2023.
 \url{https://signal.org/docs/specifications/pqxdh/} (Accessed: July 2026).
+
+\bibitem{signal_spqr}
+G. Connell and R. Schmidt.
+\emph{Signal Protocol and Post-Quantum Ratchets}.
+Signal Technology Foundation Blog, October 2025.
+\url{https://signal.org/blog/spqr/}.
+
+\bibitem{auerbach2025spqr}
+B. Auerbach, G. Connell, C. Firmin, S. Katsumata, R. Schmidt, and T. Wiggers.
+\emph{Ratcheted Encryption with Fragile and Scalable Post-Quantum Security}.
+In \emph{USENIX Security Symposium}, 2025.
+
+\bibitem{imessage_pq3}
+Apple Security Engineering and Architecture (SEAR).
+\emph{iMessage with PQ3: The new state of the art in quantum-secure messaging at scale}.
+Apple Security Research Blog, February 2024.
+\url{https://security.apple.com/blog/imessage-pq3/}.
 
 \bibitem{marlinspike_x3dh}
 M. Marlinspike and T. Perrin.
