@@ -1,6 +1,9 @@
 use hkdf::hmac::{Hmac, Mac};
 use hkdf::Hkdf;
-use ml_dsa::{Generate, Keypair, MlDsa65, Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ml_dsa::{
+    Generate, Keypair, MlDsa65, Signature, SignatureEncoding, Signer, SigningKey, Verifier,
+    VerifyingKey,
+};
 use ml_kem::kem::Decapsulate;
 use ml_kem::{DecapsulationKey, Encapsulate, EncapsulationKey, KeyExport, MlKem768, Seed};
 use rand_core::Rng;
@@ -199,25 +202,58 @@ fn blake3_kdf(key: &Key32, domain: u8, info: &[u8]) -> Key32 {
 }
 
 pub struct HandshakeMessageM0 {
-    pub alice_ik_dsa_pk: Vec<u8>,
+    pub alice_ik_dsa_pk: VerifyingKey<MlDsa65>,
     pub alice_ik_dh_pk: XPublicKey,
     pub alice_eph_pk: XPublicKey,
     pub ct_pq1: ml_kem::Ciphertext<MlKem768>,
     pub ct_pq2: ml_kem::Ciphertext<MlKem768>,
     pub prekey_id: String,
     pub confirmation_tag: [u8; 32],
+    /// Initiator signature σ_{M_0} = ML-DSA.Sign(IK^DSA_{sk,A}, M_0^{core})
+    /// Binds IK^DH_{pk,A} and all ephemeral/target keys to IK^DSA_{pk,A}.
+    pub signature: Signature<MlDsa65>,
+}
+
+fn m0_signature_bytes(
+    alice_ik_dsa_pk: &[u8],
+    alice_ik_dh_pk: &XPublicKey,
+    bob_ik_dsa_pk: &[u8],
+    alice_eph_pk: &XPublicKey,
+    ct_pq1: &[u8],
+    ct_pq2: &[u8],
+    prekey_id: &str,
+    confirmation_tag: &[u8; 32],
+) -> Vec<u8> {
+    let mut data = b"StarMesh-Handshake-M0-Init-v1".to_vec();
+    data.extend_from_slice(&(alice_ik_dsa_pk.len() as u32).to_be_bytes());
+    data.extend_from_slice(alice_ik_dsa_pk);
+    data.extend_from_slice(alice_ik_dh_pk.as_bytes());
+    data.extend_from_slice(&(bob_ik_dsa_pk.len() as u32).to_be_bytes());
+    data.extend_from_slice(bob_ik_dsa_pk);
+    data.extend_from_slice(alice_eph_pk.as_bytes());
+    data.extend_from_slice(&(ct_pq1.len() as u32).to_be_bytes());
+    data.extend_from_slice(ct_pq1);
+    data.extend_from_slice(&(ct_pq2.len() as u32).to_be_bytes());
+    data.extend_from_slice(ct_pq2);
+    data.extend_from_slice(&(prekey_id.len() as u32).to_be_bytes());
+    data.extend_from_slice(prekey_id.as_bytes());
+    data.extend_from_slice(confirmation_tag);
+    data
 }
 
 /// 3.2 Hybrid PQ-X3DH Handshake (Initiator Side)
 /// Implements Section 3.2 of the paper: Alice's handshake computation.
 /// Returns OKM (Output Keying Material) shared between initiator and responder.
 pub fn pq_x3dh_initiator(
-    alice_ik_dsa_pk: &[u8],
+    alice_signing_key: &SigningKey<MlDsa65>,
     alice_ik_dh_sk: &StaticSecret,
     alice_ik_dh_pk: &XPublicKey,
     bob_ik_dsa_pk: &[u8],
     bob_bundle: &BobPreKeyBundle,
 ) -> Result<(Key64, HandshakeMessageM0), CryptoError> {
+    let alice_ik_dsa_vk = alice_signing_key.verifying_key().clone();
+    let alice_ik_dsa_pk_bytes = alice_ik_dsa_vk.encode().to_vec();
+
     // Step 1: Classical X3DH Component
     // SECURITY: Derives 4 DH shared secrets and concatenates them
     let alice_eph_sk = random_x25519_secret();
@@ -249,8 +285,8 @@ pub fn pq_x3dh_initiator(
 
     // CLAIM: info binds Alice's identity, Bob's identity, and all ephemeral/ciphertext material
     let mut info = b"StarMesh".to_vec();
-    info.extend_from_slice(&(alice_ik_dsa_pk.len() as u32).to_be_bytes());
-    info.extend_from_slice(alice_ik_dsa_pk);
+    info.extend_from_slice(&(alice_ik_dsa_pk_bytes.len() as u32).to_be_bytes());
+    info.extend_from_slice(&alice_ik_dsa_pk_bytes);
     info.extend_from_slice(&(bob_ik_dsa_pk.len() as u32).to_be_bytes());
     info.extend_from_slice(bob_ik_dsa_pk);
 
@@ -279,14 +315,28 @@ pub fn pq_x3dh_initiator(
     let mut confirmation_tag = [0u8; 32];
     confirmation_tag.copy_from_slice(&confirmation_mac.finalize().into_bytes());
 
+    // Sign M_0 to bind Alice's DH key to her DSA identity and provide PQ initiator authentication
+    let sig_bytes = m0_signature_bytes(
+        alice_ik_dsa_pk_bytes.as_ref(),
+        alice_ik_dh_pk,
+        bob_ik_dsa_pk,
+        &alice_eph_pk,
+        ct_pq1_bytes,
+        ct_pq2_bytes,
+        "otpk_1",
+        &confirmation_tag,
+    );
+    let signature = alice_signing_key.sign(&sig_bytes);
+
     let m0 = HandshakeMessageM0 {
-        alice_ik_dsa_pk: alice_ik_dsa_pk.to_vec(),
+        alice_ik_dsa_pk: alice_ik_dsa_vk,
         alice_ik_dh_pk: *alice_ik_dh_pk,
         alice_eph_pk,
         ct_pq1,
         ct_pq2,
         prekey_id: "otpk_1".to_string(),
         confirmation_tag,
+        signature,
     };
 
     Ok((okm, m0))
@@ -300,6 +350,27 @@ pub fn pq_x3dh_responder(
     bob_secrets: &BobSecretBundle,
     m0: &HandshakeMessageM0,
 ) -> Result<Key64, CryptoError> {
+    // Step 0: Verify initiator signature σ_{M_0} under Alice's ML-DSA-65 identity key.
+    // This cryptographically binds alice_ik_dh_pk to alice_ik_dsa_pk, preventing
+    // classical DH identity substitution, and provides post-quantum initiator authentication.
+    let ct_pq1_bytes: &[u8] = m0.ct_pq1.as_ref();
+    let ct_pq2_bytes: &[u8] = m0.ct_pq2.as_ref();
+    let alice_ik_dsa_pk_bytes = m0.alice_ik_dsa_pk.encode().to_vec();
+
+    let sig_bytes = m0_signature_bytes(
+        &alice_ik_dsa_pk_bytes,
+        &m0.alice_ik_dh_pk,
+        bob_ik_dsa_pk,
+        &m0.alice_eph_pk,
+        ct_pq1_bytes,
+        ct_pq2_bytes,
+        &m0.prekey_id,
+        &m0.confirmation_tag,
+    );
+    m0.alice_ik_dsa_pk
+        .verify(&sig_bytes, &m0.signature)
+        .map_err(|_| CryptoError::AuthenticationFailed)?;
+
     // Step 1: Classical component (commutes with Alice's calculation)
     // SECURITY: Each of the 4 DH pairs must succeed
     let dh1 = bob_secrets.spk_sk.diffie_hellman(&m0.alice_ik_dh_pk);
@@ -326,8 +397,8 @@ pub fn pq_x3dh_responder(
     ss_hybrid.extend_from_slice(ss_pq2.as_ref());
 
     let mut info = b"StarMesh".to_vec();
-    info.extend_from_slice(&(m0.alice_ik_dsa_pk.len() as u32).to_be_bytes());
-    info.extend_from_slice(&m0.alice_ik_dsa_pk);
+    info.extend_from_slice(&(alice_ik_dsa_pk_bytes.len() as u32).to_be_bytes());
+    info.extend_from_slice(&alice_ik_dsa_pk_bytes);
     info.extend_from_slice(&(bob_ik_dsa_pk.len() as u32).to_be_bytes());
     info.extend_from_slice(bob_ik_dsa_pk);
 
@@ -335,11 +406,9 @@ pub fn pq_x3dh_responder(
     info.extend_from_slice(&(eph_bytes.len() as u32).to_be_bytes());
     info.extend_from_slice(eph_bytes);
 
-    let ct_pq1_bytes: &[u8] = m0.ct_pq1.as_ref();
     info.extend_from_slice(&(ct_pq1_bytes.len() as u32).to_be_bytes());
     info.extend_from_slice(ct_pq1_bytes);
 
-    let ct_pq2_bytes: &[u8] = m0.ct_pq2.as_ref();
     info.extend_from_slice(&(ct_pq2_bytes.len() as u32).to_be_bytes());
     info.extend_from_slice(ct_pq2_bytes);
 
@@ -768,8 +837,10 @@ fn run() -> Result<(), CryptoError> {
 
     hr("Phase 1 — Key Generation");
 
-    let alice_ik_dsa_pk = vec![0x42u8; 1952]; // Simulated ML-DSA-65 identity public key (1952 B)
-    let bob_ik_dsa_pk = vec![0x24u8; 1952]; // Simulated ML-DSA-65 identity public key (1952 B)
+    let alice_signing_key = demo_signing_key();
+    let alice_ik_dsa_pk = alice_signing_key.verifying_key().encode().to_vec();
+    let bob_signing_key = demo_signing_key();
+    let bob_ik_dsa_pk = bob_signing_key.verifying_key().encode().to_vec();
 
     // Alice long-term Classical keys
     let alice_ik_dh_sk = random_x25519_secret();
@@ -820,7 +891,7 @@ fn run() -> Result<(), CryptoError> {
     hr("Phase 2 — Hybrid PQ-X3DH Handshake");
 
     let (okm_alice, m0) = pq_x3dh_initiator(
-        &alice_ik_dsa_pk,
+        &alice_signing_key,
         &alice_ik_dh_sk,
         &alice_ik_dh_pk,
         &bob_ik_dsa_pk,
@@ -828,9 +899,10 @@ fn run() -> Result<(), CryptoError> {
     )?;
     println!("  Alice computes OKM: {}", hex_str(&okm_alice));
     println!(
-        "  Transmitted M0 payload includes IK^DSA_pk,A ({} B) and IK^DH_pk,A ({} B)",
-        m0.alice_ik_dsa_pk.len(),
-        m0.alice_ik_dh_pk.as_bytes().len()
+        "  Transmitted M0 payload includes IK^DSA_pk,A ({} B), IK^DH_pk,A ({} B), and σ_M0 signature ({} B)",
+        m0.alice_ik_dsa_pk.encode().len(),
+        m0.alice_ik_dh_pk.as_bytes().len(),
+        m0.signature.to_bytes().len()
     );
 
     let okm_bob = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0)?;
@@ -909,8 +981,9 @@ fn run_benchmarks() -> Result<(), CryptoError> {
     println!("  Running 1,000 iterations of core cryptographic operations...");
 
     // Setup keys
-    let alice_ik_dsa_pk = vec![0x42u8; 1952];
-    let bob_ik_dsa_pk = vec![0x24u8; 1952];
+    let alice_signing_key = demo_signing_key();
+    let bob_signing_key = demo_signing_key();
+    let bob_ik_dsa_pk = bob_signing_key.verifying_key().encode().to_vec();
     let alice_ik_dh_sk = random_x25519_secret();
     let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
     let bob_ik_dh_sk = random_x25519_secret();
@@ -942,7 +1015,7 @@ fn run_benchmarks() -> Result<(), CryptoError> {
     for _ in 0..1000 {
         let start = std::time::Instant::now();
         let (_okm_alice, m0) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk,
+            &alice_signing_key,
             &alice_ik_dh_sk,
             &alice_ik_dh_pk,
             &bob_ik_dsa_pk,
@@ -1025,8 +1098,9 @@ mod tests {
 
     #[test]
     fn test_pq_x3dh_handshake() {
-        let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk = vec![0x24u8; 1952];
+        let alice_signing_key = demo_signing_key();
+        let bob_signing_key = demo_signing_key();
+        let bob_ik_dsa_pk = bob_signing_key.verifying_key().encode().to_vec();
 
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
@@ -1060,7 +1134,7 @@ mod tests {
         };
 
         let (okm_alice, m0) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk,
+            &alice_signing_key,
             &alice_ik_dh_sk,
             &alice_ik_dh_pk,
             &bob_ik_dsa_pk,
@@ -1235,9 +1309,8 @@ mod tests {
     /// should result in different OKM values.
     #[test]
     fn test_transcript_binding_changes_okm() {
-        let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk = vec![0x24u8; 1952];
-
+        let bob_signing_key = demo_signing_key();
+        let bob_ik_dsa_pk = bob_signing_key.verifying_key().encode().to_vec();
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
 
@@ -1259,8 +1332,9 @@ mod tests {
             pq_otpk_pk: bob_pq_otpk_pk.clone(),
         };
 
+        let alice_signing_key1 = demo_signing_key();
         let (okm1, _m0_orig) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk,
+            &alice_signing_key1,
             &alice_ik_dh_sk,
             &alice_ik_dh_pk,
             &bob_ik_dsa_pk,
@@ -1268,12 +1342,10 @@ mod tests {
         )
         .expect("First handshake failed");
 
-        // Create a modified message with altered identity
-        let mut alice_ik_dsa_pk_modified = alice_ik_dsa_pk.clone();
-        alice_ik_dsa_pk_modified[0] ^= 0xFF;
-
+        // Create a second session with a different signing identity
+        let alice_signing_key2 = demo_signing_key();
         let (okm2, _m0_alt) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk_modified,
+            &alice_signing_key2,
             &alice_ik_dh_sk,
             &alice_ik_dh_pk,
             &bob_ik_dsa_pk,
@@ -1368,9 +1440,8 @@ mod tests {
     /// This is verified by comparing the responder's computed SS with initiator's.
     #[test]
     fn test_hybrid_ss_consistency() {
-        let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk = vec![0x24u8; 1952];
-
+        let bob_signing_key = demo_signing_key();
+        let bob_ik_dsa_pk = bob_signing_key.verifying_key().encode().to_vec();
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
         let bob_ik_dh_sk = random_x25519_secret();
@@ -1400,9 +1471,10 @@ mod tests {
         };
 
         // Run handshake 10 times
+        let alice_signing_key = demo_signing_key();
         for _ in 0..10 {
             let (okm_alice, m0) = pq_x3dh_initiator(
-                &alice_ik_dsa_pk,
+                &alice_signing_key,
                 &alice_ik_dh_sk,
                 &alice_ik_dh_pk,
                 &bob_ik_dsa_pk,
@@ -1451,9 +1523,8 @@ mod tests {
     /// Different handshakes must produce different OKMs (statistical independence).
     #[test]
     fn test_key_independence_across_sessions() {
-        let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk = vec![0x24u8; 1952];
-
+        let bob_signing_key = demo_signing_key();
+        let bob_ik_dsa_pk = bob_signing_key.verifying_key().encode().to_vec();
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
 
@@ -1476,10 +1547,11 @@ mod tests {
         };
 
         // Generate 5 handshakes
+        let alice_signing_key = demo_signing_key();
         let mut okms = Vec::new();
         for _ in 0..5 {
             let (okm, _m0) = pq_x3dh_initiator(
-                &alice_ik_dsa_pk,
+                &alice_signing_key,
                 &alice_ik_dh_sk,
                 &alice_ik_dh_pk,
                 &bob_ik_dsa_pk,
@@ -1536,9 +1608,8 @@ mod tests {
     /// This verifies the commutative property of DH and symmetric KEM.
     #[test]
     fn test_asymmetric_paths_converge() {
-        let alice_ik_dsa_pk = vec![0x42u8; 1952];
-        let bob_ik_dsa_pk = vec![0x24u8; 1952];
-
+        let bob_signing_key = demo_signing_key();
+        let bob_ik_dsa_pk = bob_signing_key.verifying_key().encode().to_vec();
         let alice_ik_dh_sk = random_x25519_secret();
         let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
 
@@ -1568,8 +1639,9 @@ mod tests {
             pq_otpk_sk: bob_pq_otpk_sk,
         };
 
+        let alice_signing_key = demo_signing_key();
         let (okm_alice, m0) = pq_x3dh_initiator(
-            &alice_ik_dsa_pk,
+            &alice_signing_key,
             &alice_ik_dh_sk,
             &alice_ik_dh_pk,
             &bob_ik_dsa_pk,
@@ -1585,6 +1657,70 @@ mod tests {
             "FAILED: Asymmetric paths did not converge"
         );
         println!("  ✅ Asymmetric Path Convergence verified: Both parties arrive at same secret");
+    }
+
+    /// Tests that substituting Alice's DH key in M0 is rejected by Bob,
+    /// proving that M0's ML-DSA-65 signature binds Alice's DH identity to her DSA identity.
+    #[test]
+    fn test_m0_dh_identity_substitution_is_rejected() {
+        let alice_signing_key = demo_signing_key();
+        let alice_ik_dh_sk = random_x25519_secret();
+        let alice_ik_dh_pk = XPublicKey::from(&alice_ik_dh_sk);
+
+        let bob_signing_key = demo_signing_key();
+        let bob_ik_dsa_pk = bob_signing_key.verifying_key().encode().to_vec();
+
+        let bob_ik_dh_sk = random_x25519_secret();
+        let bob_ik_dh_pk = XPublicKey::from(&bob_ik_dh_sk);
+        let bob_spk_sk = random_x25519_secret();
+        let bob_spk_pk = XPublicKey::from(&bob_spk_sk);
+        let bob_otpk_sk = random_x25519_secret();
+        let bob_otpk_pk = XPublicKey::from(&bob_otpk_sk);
+
+        let (bob_pq_spk_pk, bob_pq_spk_sk) = mlkem768_keygen();
+        let (bob_pq_otpk_pk, bob_pq_otpk_sk) = mlkem768_keygen();
+
+        let bob_bundle = BobPreKeyBundle {
+            ik_dh_pk: bob_ik_dh_pk,
+            spk_pk: bob_spk_pk,
+            otpk_pk: bob_otpk_pk,
+            pq_spk_pk: bob_pq_spk_pk,
+            pq_otpk_pk: bob_pq_otpk_pk,
+        };
+
+        let bob_secrets = BobSecretBundle {
+            ik_dh_sk: bob_ik_dh_sk,
+            spk_sk: bob_spk_sk,
+            otpk_sk: bob_otpk_sk,
+            pq_spk_sk: bob_pq_spk_sk,
+            pq_otpk_sk: bob_pq_otpk_sk,
+        };
+
+        let (_okm_alice, mut m0) = pq_x3dh_initiator(
+            &alice_signing_key,
+            &alice_ik_dh_sk,
+            &alice_ik_dh_pk,
+            &bob_ik_dsa_pk,
+            &bob_bundle,
+        )
+        .expect("Alice failed");
+
+        // Adversary Charlie substitutes Alice's DH key with Charlie's DH key in M0
+        let charlie_dh_sk = random_x25519_secret();
+        let charlie_dh_pk = XPublicKey::from(&charlie_dh_sk);
+        m0.alice_ik_dh_pk = charlie_dh_pk;
+
+        // Bob must reject M0 because σ_{M_0} binds alice_ik_dh_pk to alice_ik_dsa_pk
+        let res = pq_x3dh_responder(&bob_ik_dsa_pk, &bob_secrets, &m0);
+        assert!(
+            res.is_err(),
+            "Bob must reject M0 when DH key is substituted"
+        );
+        match res {
+            Err(CryptoError::AuthenticationFailed) => (),
+            _ => panic!("Expected AuthenticationFailed error"),
+        }
+        println!("  ✅ M0 DH Key Substitution rejected: Identity binding verified");
     }
 
     /// CLAIM (Paper §3.2): Implicit Rejection (ML-KEM FIPS 203 §7.3)

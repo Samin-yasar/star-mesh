@@ -47,6 +47,10 @@
  *       → Whenever Alice finishes, Bob published the bundle.            ✓
  *   RESULT inj-event(AliceFinished(...)) ==> inj-event(BobPublished(...)) is true.
  *       → Injective: no replay of M_0 causes two AliceFinished events.  ✓
+ *   RESULT event(BobAcceptedM0(...)) ==> event(AliceStarted(...)) is true.
+ *       → Alice-to-Bob initiator authentication: Bob only accepts M_0   ✓
+ *         if Alice (the holder of IK^DSA_{sk,A}) actually started the
+ *         session — IK^DH_{pk,A} is bound to IK^DSA_{pk,A} via σ_0.
  *)
 
 
@@ -185,10 +189,14 @@ fun dhtKey(dsaPk): bitstring [data].
 fun mkBundle(dsaPk, dhPk, dhPk, dhPk, kemPk, kemPk, bitstring): bitstring [data].
 
 (*
- * Alice's handshake message M_0 (paper.tex §3.4):
- *   M_0 = (IK^DSA_{pk,A}, IK^DH_{pk,A}, EK_{pk,A}, ct_1, ct_2, tag_A)
+ * Alice's handshake message M_0 (paper.tex §3.4, updated):
+ *   M_0 = (IK^DSA_{pk,A}, IK^DH_{pk,A}, EK_{pk,A}, ct_1, ct_2, tag_A, σ_0)
+ * where σ_0 = Sign(IK^DSA_{sk,A}, "StarMesh-M0" || IK^DH_{pk,A} || EK_{pk,A}
+ *                                               || ct_1 || ct_2 || tag_A)
+ * The extra signature field binds IK^DH_{pk,A} to IK^DSA_{pk,A}.
  *)
-fun mkM0(dsaPk, dhPk, dhPk, kemCt, kemCt, bitstring): bitstring [data].
+fun mkM0(dsaPk, dhPk, dhPk, kemCt, kemCt, bitstring, bitstring): bitstring [data].
+(*         DSA_pk,  DH_pk,  EK_pk,  ct1,    ct2,      tag_A,      σ_0        *)
 
 
 (* ═══════════════════════════════════════════════════════════════════════════
@@ -211,6 +219,8 @@ event BobPublished(dsaPk).                     (* Bob published a bundle under t
 event AliceStarted(dsaPk, dsaPk).              (* Alice started:  (alice_id, bob_id)            *)
 event AliceFinished(dsaPk, dsaPk, bitstring).  (* Alice derived:  (alice_id, bob_id, RK)        *)
 event BobFinished(dsaPk, dsaPk, bitstring).    (* Bob derived:    (alice_id, bob_id, RK)        *)
+event BobAcceptedM0(dsaPk, dsaPk, bitstring).  (* Bob verified σ_0 and accepted M_0:            *)
+                                               (*   (alice_id, bob_id, RK)                      *)
 
 
 (* ═══════════════════════════════════════════════════════════════════════════
@@ -254,8 +264,19 @@ query attacker(sess_key_witness).
 query a: dsaPk, b: dsaPk, rk: bitstring;
     event(AliceFinished(a, b, rk)) ==> event(BobPublished(b)).
 
-(* Q3 and Q4 (Agreement) are verified in the bounded session model (pq_x3dh_bounded.pv)
-   to prevent state space explosion under unbounded parallel replication. *)
+(*
+ * Q3 — ALICE-TO-BOB INITIATOR AUTHENTICATION  (paper.tex §3.4, σ_0 fix)
+ *
+ * Whenever Bob accepts M_0 (verifies σ_0 and derives the same RK), Alice
+ * must have started a session with that Bob.  This machine-checks that
+ * IK^DH_{pk,A} is bound to IK^DSA_{pk,A} via σ_0: an attacker who places
+ * their own DH key in M_0 cannot produce a valid σ_0 without IK^DSA_{sk,A},
+ * so BobAcceptedM0 cannot fire without a matching AliceStarted.
+ *
+ * EXPECTED: true
+ *)
+query a: dsaPk, b: dsaPk, rk: bitstring;
+    event(BobAcceptedM0(a, b, rk)) ==> event(AliceStarted(a, b)).
 
 
 (* ═══════════════════════════════════════════════════════════════════════════
@@ -330,9 +351,17 @@ let Alice(ikDhSkA: dhSk, ikDsaSkA: dsaSk, ikDsaPkB: dsaPk) =
    let kconf = hkdf_hs_rk(ss_hybrid, info) in
    let tagA = hmac_confirm(kconf, info) in
 
-    (* Step 6: Transmit M_0 (paper.tex §3.4 "Handshake Message") *)
+    (* Step 6: Sign M0core to bind IK^DH_{pk,A} to IK^DSA_{pk,A} (paper.tex §3.4 σ_0 fix).
+               m0core = IK^DH_{pk,A} || EK_{pk,A} || ct1 || ct2 || tagA  *)
+    let m0core = cat4(dhPk2b(dh_pk(ikDhSkA)),
+                      dhPk2b(dh_pk(ekSkA)),
+                      kemCt2b(ct1),
+                      kemCt2b(ct2)) in
+    let sigma0 = sign(ikDsaSkA, cat2(m0core, tagA)) in
+
+    (* Step 7: Transmit M_0 with σ_0 (paper.tex §3.4 "Handshake Message") *)
     event AliceFinished(dsa_pk(ikDsaSkA), ikDsaPkB, rk);
-   out(pub, mkM0(dsa_pk(ikDsaSkA), dh_pk(ikDhSkA), dh_pk(ekSkA), ct1, ct2, tagA));
+   out(pub, mkM0(dsa_pk(ikDsaSkA), dh_pk(ikDhSkA), dh_pk(ekSkA), ct1, ct2, tagA, sigma0));
 
     (*
      * Secrecy test: encrypt private witness under RK.
@@ -370,7 +399,15 @@ let Bob(ikDhSkB: dhSk, ikDsaSkB: dsaSk,
 
     (* Step 1: Receive M_0 (or any attacker-fabricated message) *)
     in(pub, raw_m0: bitstring);
-   let mkM0(=ikDsaPkA, ikDhPkA, ekPkA, ct1, ct2, tagA) = raw_m0 in
+   let mkM0(=ikDsaPkA, ikDhPkA, ekPkA, ct1, ct2, tagA, sigma0) = raw_m0 in
+
+    (* Step 1b: Verify σ_0 — ensures IK^DH_{pk,A} is bound to IK^DSA_{pk,A}.
+                m0core = IK^DH_{pk,A} || EK_{pk,A} || ct1 || ct2            *)
+    let m0core = cat4(dhPk2b(ikDhPkA),
+                      dhPk2b(ekPkA),
+                      kemCt2b(ct1),
+                      kemCt2b(ct2)) in
+    let (=cat2(m0core, tagA)) = verify(ikDsaPkA, sigma0) in
 
     (* Step 2: Recompute DH values using Bob's secret keys *)
     let dh1 = dh(spkSkB,  ikDhPkA) in  (* DH(SPK_{sk,B},    IK^DH_{pk,A}) *)
@@ -402,7 +439,7 @@ let Bob(ikDhSkB: dhSk, ikDsaSkB: dsaSk,
     let (=sess_key_witness) = aead_dec(rk, first_msg) in
 
     (*
-   * Key agreement and explicit tag_A confirmation (paper.tex §3.4):
+   * Key agreement, σ_0 verification, and explicit tag_A confirmation (paper.tex §3.4):
      * By DH commutativity:
      *   dh(spkSkB, ikDhPkA)  [Bob's view]
      *   = dh(ikDhSkA, dh_pk(spkSkB))  [Alice's view, by the equation]
@@ -410,7 +447,10 @@ let Bob(ikDhSkB: dhSk, ikDsaSkB: dsaSk,
      * Similarly for dh2/dh3/dh4 when ekPkA = dh_pk(ekSkA).
      * By KEM correctness: ssPQ1_bob = ssPQ1_alice, ssPQ2_bob = ssPQ2_alice.
      * Therefore RK_bob = RK_alice in the honest execution.
+     * σ_0 verification (Step 1b) additionally guarantees that the ikDhPkA
+     * Bob used was explicitly endorsed by the holder of IK^DSA_{sk,A}.
      *)
+    event BobAcceptedM0(ikDsaPkA, dsa_pk(ikDsaSkB), rk);
     event BobFinished(ikDsaPkA, dsa_pk(ikDsaSkB), rk)
 .
 

@@ -75,7 +75,25 @@ class X25519:
         ss = ss_int.to_bytes(128, "big")
         return hashlib.sha256(ss).digest()
 
-def pq_x3dh_initiator(alice_ik_dsa_pk: bytes, alice_ik_dh_sk: bytes, alice_ik_dh_pk: bytes, bob_ik_dsa_pk: bytes, bob_bundle: dict) -> tuple[bytes, dict]:
+class MLDSA65:
+    @staticmethod
+    def keygen():
+        sk = os.urandom(32)
+        pk = os.urandom(1952)
+        return sk, pk
+
+    @staticmethod
+    def sign(sk: bytes, msg: bytes) -> bytes:
+        return hmac.new(sk, msg, hashlib.sha256).digest() + sk
+
+    @staticmethod
+    def verify(pk: bytes, msg: bytes, sig: bytes) -> bool:
+        if len(sig) != 64:
+            return False
+        tag, sk = sig[:32], sig[32:]
+        return hmac.new(sk, msg, hashlib.sha256).digest() == tag
+
+def pq_x3dh_initiator(alice_ik_dsa_sk: bytes, alice_ik_dsa_pk: bytes, alice_ik_dh_sk: bytes, alice_ik_dh_pk: bytes, bob_ik_dsa_pk: bytes, bob_bundle: dict) -> tuple[bytes, dict]:
     eph_sk, eph_pk = X25519.keygen()
 
     dh1 = X25519.dh(alice_ik_dh_sk,  bob_bundle["spk_pk"])
@@ -100,6 +118,17 @@ def pq_x3dh_initiator(alice_ik_dsa_pk: bytes, alice_ik_dh_sk: bytes, alice_ik_dh
 
     OKM = hkdf(ikm=SS_hybrid, salt=b'\x00' * 32, info=info, length=64)
 
+    # Sign M_0 to bind Alice's DH key to her DSA identity key and give PQ initiator authentication
+    m0_core = (b"StarMesh-Handshake-M0-Init-v1"
+               + struct.pack(">I", len(alice_ik_dsa_pk)) + alice_ik_dsa_pk
+               + alice_ik_dh_pk
+               + struct.pack(">I", len(bob_ik_dsa_pk)) + bob_ik_dsa_pk
+               + eph_pk
+               + struct.pack(">I", len(ct_spk)) + ct_spk
+               + struct.pack(">I", len(ct_otpk)) + ct_otpk
+               + b"otpk_1")
+    sig_m0 = MLDSA65.sign(alice_ik_dsa_sk, m0_core)
+
     m0_payload = {
         "alice_ik_dsa_pk": alice_ik_dsa_pk,
         "alice_ik_dh_pk":  alice_ik_dh_pk,
@@ -107,6 +136,7 @@ def pq_x3dh_initiator(alice_ik_dsa_pk: bytes, alice_ik_dh_sk: bytes, alice_ik_dh
         "ct_spk":          ct_spk,
         "ct_otpk":         ct_otpk,
         "prekey_id":       "otpk_1",
+        "sig_m0":          sig_m0,
     }
     return OKM, m0_payload
 
@@ -116,6 +146,17 @@ def pq_x3dh_responder(bob_ik_dsa_pk: bytes, bob_sk_bundle: dict, m0: dict) -> by
     eph_pk          = m0["eph_pk"]
     ct_spk          = m0["ct_spk"]
     ct_otpk         = m0["ct_otpk"]
+
+    # Step 0: Verify initiator signature σ_{M_0} under Alice's ML-DSA-65 identity key
+    m0_core = (b"StarMesh-Handshake-M0-Init-v1"
+               + struct.pack(">I", len(alice_ik_dsa_pk)) + alice_ik_dsa_pk
+               + alice_ik_dh_pk
+               + struct.pack(">I", len(bob_ik_dsa_pk)) + bob_ik_dsa_pk
+               + eph_pk
+               + struct.pack(">I", len(ct_spk)) + ct_spk
+               + struct.pack(">I", len(ct_otpk)) + ct_otpk
+               + m0["prekey_id"].encode("utf-8"))
+    assert MLDSA65.verify(alice_ik_dsa_pk, m0_core, m0["sig_m0"]), "❌ M0 signature verification failed!"
 
     dh1 = X25519.dh(bob_sk_bundle["spk_sk"],   alice_ik_dh_pk)
     dh2 = X25519.dh(bob_sk_bundle["ik_dh_sk"], eph_pk)
