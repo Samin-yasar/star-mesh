@@ -5,16 +5,16 @@
 <line x1="70" y1="70" x2="70" y2="450" stroke="#333"/>
 <text x="415.0" y="502" font-family="sans-serif" font-size="13">offered load (packets/slot)</text>
 <text x="15" y="260.0" transform="rotate(-90 15 260.0)" font-family="sans-serif" font-size="13">proxy fraction</text>
-<polyline points="82.7,70.0 133.3,347.2 196.7,377.6 323.3,301.7 576.7,340.7 830.0,343.3" fill="none" stroke="#0b7285" stroke-width="3"/>
+<polyline points="82.7,70.0 133.3,344.3 196.7,384.1 323.3,308.6 576.7,343.4 830.0,344.6" fill="none" stroke="#0b7285" stroke-width="3"/>
 <line x1="720" y1="55" x2="742" y2="55" stroke="#0b7285" stroke-width="3"/>
 <text x="748" y="60" font-family="sans-serif" font-size="12">churn=0.00</text>
-<polyline points="82.7,286.3 133.3,430.9 196.7,346.0 323.3,192.0 576.7,341.4 830.0,258.1" fill="none" stroke="#d9480f" stroke-width="3"/>
+<polyline points="82.7,288.5 133.3,427.4 196.7,343.1 323.3,199.3 576.7,350.2 830.0,243.3" fill="none" stroke="#d9480f" stroke-width="3"/>
 <line x1="720" y1="77" x2="742" y2="77" stroke="#d9480f" stroke-width="3"/>
 <text x="748" y="82" font-family="sans-serif" font-size="12">churn=0.10</text>
-<polyline points="82.7,394.0 133.3,316.3 196.7,387.7 323.3,301.4 576.7,243.2 830.0,194.4" fill="none" stroke="#5f3dc4" stroke-width="3"/>
+<polyline points="82.7,387.3 133.3,311.6 196.7,386.0 323.3,304.2 576.7,265.4 830.0,202.1" fill="none" stroke="#5f3dc4" stroke-width="3"/>
 <line x1="720" y1="99" x2="742" y2="99" stroke="#5f3dc4" stroke-width="3"/>
 <text x="748" y="104" font-family="sans-serif" font-size="12">churn=0.20</text>
-<polyline points="82.7,438.1 133.3,383.7 196.7,377.9 323.3,298.7 576.7,344.6 830.0,345.0" fill="none" stroke="#2b8a3e" stroke-width="3"/>
+<polyline points="82.7,430.6 133.3,377.3 196.7,381.8 323.3,313.8 576.7,346.6 830.0,351.9" fill="none" stroke="#2b8a3e" stroke-width="3"/>
 <line x1="720" y1="121" x2="742" y2="121" stroke="#2b8a3e" stroke-width="3"/>
 <text x="748" y="126" font-family="sans-serif" font-size="12">churn=0.30</text>
 </svg>

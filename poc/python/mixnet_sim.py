@@ -18,6 +18,7 @@ from pathlib import Path
 
 MLKEM_PK_BYTES = 1184
 MLKEM_CT_BYTES = 1088
+MLDSA_SIG_BYTES = 3309
 DEFAULT_MTU = 1500
 DEFAULT_BASE_PAYLOAD = 192
 DEFAULT_SPHINX_OVERHEAD = 96
@@ -26,11 +27,14 @@ DEFAULT_SPHINX_OVERHEAD = 96
 @dataclass
 class Packet:
     packet_id: int
+    msg_id: int
     kind: str
     size: int
     entry: int
     exit: int
     enqueue_time: int
+    frag_index: int = 0
+    frag_total: int = 1
     hop: int = 0
 
 
@@ -55,11 +59,18 @@ def percentile(values: list[int], fraction: float) -> float:
     return float(ordered[index])
 
 
-def packet_sizes(base_payload: int, sphinx_overhead: int) -> dict[str, int]:
+def packet_sizes(base_payload: int, sphinx_overhead: int, signed: bool = True) -> dict[str, int]:
+    if not signed:
+        return {
+            "normal": base_payload + sphinx_overhead,
+            "pq_pk": base_payload + sphinx_overhead + MLKEM_PK_BYTES,
+            "pq_ct": base_payload + sphinx_overhead + MLKEM_CT_BYTES,
+        }
     return {
         "normal": base_payload + sphinx_overhead,
-        "pq_pk": base_payload + sphinx_overhead + MLKEM_PK_BYTES,
-        "pq_ct": base_payload + sphinx_overhead + MLKEM_CT_BYTES,
+        "pq_pk_signed_total": base_payload + sphinx_overhead + MLKEM_PK_BYTES + MLDSA_SIG_BYTES,
+        "pq_ct_signed_total": base_payload + sphinx_overhead + MLKEM_CT_BYTES + MLDSA_SIG_BYTES,
+        "fragment_mtu": DEFAULT_MTU,
     }
 
 
@@ -87,9 +98,9 @@ def simulate(
     mtu: int,
     base_payload: int,
     sphinx_overhead: int,
+    signed: bool = True,
 ) -> Result:
     rng = random.Random(seed)
-    sizes = packet_sizes(base_payload, sphinx_overhead)
     compromised = {
         node for node in range(mix_nodes)
         if rng.random() < compromised_fraction
@@ -98,7 +109,14 @@ def simulate(
     delays: list[int] = []
     generated = delivered = dropped = violations = 0
     next_packet_id = 0
+    next_msg_id = 0
+
+    # Tracking per-message fragment delivery for signed multi-packet trains
+    msg_frags_delivered: dict[int, int] = {}
+    msg_linkable: dict[int, bool] = {}
     linkable_delivered = 0
+
+    max_payload_per_frag = mtu - sphinx_overhead
 
     for now in range(slots):
         online = [rng.random() >= churn for _ in range(mix_nodes)]
@@ -106,33 +124,71 @@ def simulate(
         # New application and cover packets enter the first mix hop.
         arrivals = poisson(rng, load)
         covers = poisson(rng, cover_rate)
-        for kind in ("normal",) * arrivals + ("cover",) * covers:
-            size_kind = "normal"
-            if kind == "normal" and rng.random() < 1.0 / 50.0:
-                size_kind = "pq_pk" if rng.random() < 0.5 else "pq_ct"
-            size = sizes[size_kind]
-            generated += kind == "normal"
-            violations += size > mtu
+
+        # Application arrivals
+        for _ in range(arrivals):
+            msg_id = next_msg_id
+            next_msg_id += 1
+            generated += 1
+
+            is_kem_update = rng.random() < (1.0 / 50.0)
+            if not signed or not is_kem_update:
+                n_frags = 1
+                pkt_size = base_payload + sphinx_overhead
+                if not signed and is_kem_update:
+                    pkt_size += MLKEM_PK_BYTES if rng.random() < 0.5 else MLKEM_CT_BYTES
+            else:
+                # Signed update: ML-KEM + ML-DSA-65 signature + base payload
+                kem_bytes = MLKEM_PK_BYTES if rng.random() < 0.5 else MLKEM_CT_BYTES
+                total_payload = base_payload + kem_bytes + MLDSA_SIG_BYTES
+                n_frags = math.ceil(total_payload / max_payload_per_frag)
+                pkt_size = mtu  # Each Sphinx packet in the train is formatted to MTU
+
+            msg_frags_delivered[msg_id] = 0
+            msg_linkable[msg_id] = True
+
             path = rng.sample(range(mix_nodes), hops)
+            for f_idx in range(n_frags):
+                # Check MTU violation per transmitted packet
+                violations += pkt_size > mtu
+                packet = Packet(
+                    packet_id=next_packet_id,
+                    msg_id=msg_id,
+                    kind="normal",
+                    size=pkt_size,
+                    entry=path[0],
+                    exit=path[-1],
+                    enqueue_time=now,
+                    frag_index=f_idx,
+                    frag_total=n_frags,
+                )
+                next_packet_id += 1
+                if online[path[0]]:
+                    queues[path[0]].append(packet)
+
+        # Cover packets (always single Sphinx packet)
+        for _ in range(covers):
+            path = rng.sample(range(mix_nodes), hops)
+            pkt_size = base_payload + sphinx_overhead
+            violations += pkt_size > mtu
             packet = Packet(
                 packet_id=next_packet_id,
-                kind=kind,
-                size=size,
+                msg_id=-1,
+                kind="cover",
+                size=pkt_size,
                 entry=path[0],
                 exit=path[-1],
                 enqueue_time=now,
+                frag_index=0,
+                frag_total=1,
             )
             next_packet_id += 1
-            if not online[path[0]]:
-                dropped += kind == "normal"
-                continue
-            queues[path[0]].append(packet)
+            if online[path[0]]:
+                queues[path[0]].append(packet)
 
-        # Each hop serves a bounded number of packets. Packets advance one hop
-        # per slot, so queueing and churn affect latency and delivery separately.
+        # Each hop serves a bounded number of packets.
         for node, queue in enumerate(queues):
             if not online[node]:
-                dropped += sum(item.kind == "normal" for item in queue)
                 queue.clear()
                 continue
             serving = queue[:capacity]
@@ -140,14 +196,18 @@ def simulate(
             for packet in serving:
                 if packet.hop + 1 >= hops:
                     if packet.kind == "normal":
-                        delivered += 1
-                        delays.append(now - packet.enqueue_time + 1)
-                        if packet.entry in compromised and packet.exit in compromised:
-                            linkable_delivered += 1
+                        mid = packet.msg_id
+                        msg_frags_delivered[mid] += 1
+                        if not (packet.entry in compromised and packet.exit in compromised):
+                            msg_linkable[mid] = False
+                        if msg_frags_delivered[mid] == packet.frag_total:
+                            delivered += 1
+                            delays.append(now - packet.enqueue_time + 1)
+                            if msg_linkable[mid]:
+                                linkable_delivered += 1
                     continue
                 next_node = packet.exit if packet.hop + 1 == hops - 1 else rng.randrange(mix_nodes)
                 if not online[next_node]:
-                    dropped += packet.kind == "normal"
                     continue
                 packet.hop += 1
                 queues[next_node].append(packet)
@@ -218,10 +278,12 @@ def main() -> None:
     parser.add_argument("--mtu", type=int, default=DEFAULT_MTU)
     parser.add_argument("--base-payload", type=int, default=DEFAULT_BASE_PAYLOAD)
     parser.add_argument("--sphinx-overhead", type=int, default=DEFAULT_SPHINX_OVERHEAD)
+    parser.add_argument("--unsigned", action="store_true", help="Simulate unsigned baseline without ML-DSA signatures")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     results = []
+    is_signed = not args.unsigned
     for churn in (0.0, 0.1, 0.2, 0.3):
         for load in (1.0, 5.0, 10.0, 20.0, 40.0, 60.0):
             results.append(simulate(
@@ -237,6 +299,7 @@ def main() -> None:
                 mtu=args.mtu,
                 base_payload=args.base_payload,
                 sphinx_overhead=args.sphinx_overhead,
+                signed=is_signed,
             ))
 
     csv_path = args.output_dir / "results.csv"
@@ -246,7 +309,9 @@ def main() -> None:
         writer.writerows(result.__dict__.values() for result in results)
     write_svg(results, args.output_dir / "linkability.svg")
 
-    sizes = packet_sizes(args.base_payload, args.sphinx_overhead)
+    sizes = packet_sizes(args.base_payload, args.sphinx_overhead, signed=is_signed)
+    mode_str = "signed (Theorem 4.17 PCS, 4-packet Sphinx trains)" if is_signed else "unsigned baseline"
+    print(f"mode: {mode_str}")
     print(f"packet sizes: {sizes} bytes; MTU: {args.mtu} bytes")
     print(f"MTU violations: {sum(result.mtu_violations for result in results)}")
     print(f"wrote {csv_path} and {args.output_dir / 'linkability.svg'}")

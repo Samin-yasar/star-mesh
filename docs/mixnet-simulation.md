@@ -12,12 +12,12 @@ make mixnet-sim
 
 The default experiment sweeps offered load from 1 to 60 packets per slot and churn from 0%
 to 30%, using 30 mix nodes, three hops, two packets of service capacity per node per slot, and a
-1,500-byte MTU. Category 3 ratchet packet sizes are calculated as:
+1,500-byte MTU. Category 3 ratchet packet sizes for the signed design (Theorem 4.17) are calculated as:
 
 ```text
-normal = 192-byte payload + 96-byte Sphinx framing = 288 B
-PQ public-key packet = 288 B + 1184 B ML-KEM key = 1472 B
-PQ ciphertext packet = 288 B + 1088 B ML-KEM ciphertext = 1376 B
+normal conversational message = 192-byte payload + 96-byte Sphinx framing = 288 B (1 packet)
+signed PQ public-key update   = 192 B payload + 1184 B ML-KEM + 3309 B ML-DSA = 4685 B -> 4 Sphinx packets (<= 1500 B)
+signed PQ ciphertext reply    = 192 B payload + 1088 B ML-KEM + 3309 B ML-DSA = 4589 B -> 4 Sphinx packets (<= 1500 B)
 ```
 
 The run writes:
@@ -37,7 +37,7 @@ still fits the constant-size packet budget.
 
 ## Queueing Dynamics and Saturation Mechanism
 
-In the simulation results (e.g. Table 1 in the paper), delivery collapses sharply between offered load $\lambda = 5$ and $\lambda = 20$ pkts/slot (falling from $99.9\%$ to $33.0\%$). This drop is an expected queueing artifact of the simulation parameters rather than a protocol flaw:
+In the simulation results (Table 1 in the paper, comprising 13 evaluation runs across four churn regimes), delivery collapses sharply between offered load $\lambda = 5$ and $\lambda = 20$ pkts/slot (falling from $100.0\%$ to $31.3\%$). This drop is an expected queueing artifact of the simulation parameters rather than a protocol flaw:
 
 - **Ingress Traffic:** Each slot generates $\text{Poisson}(\lambda)$ application packets and $\text{Poisson}(\lambda_{\mathrm{cover}})$ cover packets. With the default `cover_rate = load`, the total ingress arrival rate is $2\lambda$.
 - **Hop Demand:** Each packet traverses $H = 3$ mix hops. Consequently, every arriving packet demands 3 independent forwarding operations across the network, creating an aggregate service demand of $3 \times 2\lambda = 6\lambda$ packet-services per slot.

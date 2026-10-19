@@ -62,7 +62,14 @@ pub struct RecoveryUpdateHeader {
 
 pub struct RecoveryUpdateResponse {
     pub header: KemId,
+    /// The initiator's public key that was encapsulated into — bound into σ_resp.
+    pub pq_pk: EncapsulationKey<MlKem768>,
     pub ciphertext: ml_kem::Ciphertext<MlKem768>,
+    /// Responder's ML-DSA-65 identity public key.
+    pub responder_identity_pk: VerifyingKey<MlDsa65>,
+    /// σ_resp = ML-DSA.Sign(IK^DSA_sk_resp, m_resp)
+    /// where m_resp = "UpdateAuth-Resp" ∥ sid ∥ kem_id ∥ pq_pk ∥ ct ∥ epoch ∥ prev
+    pub response_signature: Signature<MlDsa65>,
 }
 
 struct OutstandingKem {
@@ -84,13 +91,33 @@ fn recovery_header_bytes(
     predecessor: &Key32,
     pq_pk: &EncapsulationKey<MlKem768>,
 ) -> Vec<u8> {
-    let mut bytes = b"StarMesh-Recovery-v1".to_vec();
+    let mut bytes = b"StarMesh-UpdateAuth-Init-v1".to_vec();
     bytes.extend_from_slice(session_id);
     bytes.extend_from_slice(kem_id);
     bytes.extend_from_slice(&sequence.to_be_bytes());
     bytes.extend_from_slice(&epoch.to_be_bytes());
     bytes.extend_from_slice(predecessor);
     bytes.extend_from_slice(pq_pk.to_bytes().as_ref());
+    bytes
+}
+
+/// Produces the signed payload for σ_resp (Theorem 4.17 / Section 3.5.4):
+/// m_resp = "UpdateAuth-Resp" ∥ sid ∥ kem_id ∥ pq_pk ∥ ct ∥ epoch ∥ prev
+fn recovery_response_bytes(
+    session_id: &Key32,
+    kem_id: &KemId,
+    pq_pk: &EncapsulationKey<MlKem768>,
+    ciphertext: &[u8],
+    epoch: u64,
+    predecessor: &Key32,
+) -> Vec<u8> {
+    let mut bytes = b"StarMesh-UpdateAuth-Resp-v1".to_vec();
+    bytes.extend_from_slice(session_id);
+    bytes.extend_from_slice(kem_id);
+    bytes.extend_from_slice(pq_pk.to_bytes().as_ref());
+    bytes.extend_from_slice(ciphertext);
+    bytes.extend_from_slice(&epoch.to_be_bytes());
+    bytes.extend_from_slice(predecessor);
     bytes
 }
 
@@ -337,8 +364,12 @@ pub fn pq_x3dh_responder(
 pub struct RatchetState {
     pub session_id: Key32,
     pub is_initiator: bool,
+    /// IK^DSA_sk — used to sign update headers (σ_init) and responses (σ_resp).
     signing_key: SigningKey<MlDsa65>,
+    /// Peer initiator's identity key; verified on every RecoveryUpdateHeader.
     trusted_identity: Option<VerifyingKey<MlDsa65>>,
+    /// Peer responder's identity key; verified on every RecoveryUpdateResponse.
+    trusted_responder_identity: Option<VerifyingKey<MlDsa65>>,
     pub root_key: Key32,
     pub entropy_pool: Key32,
     transcript_hash: Key32,
@@ -381,6 +412,7 @@ impl RatchetState {
             is_initiator,
             signing_key: demo_signing_key(),
             trusted_identity: None,
+            trusted_responder_identity: None,
             root_key,
             entropy_pool: root_key,
             transcript_hash,
@@ -399,6 +431,13 @@ impl RatchetState {
 
     pub fn set_trusted_identity(&mut self, identity: VerifyingKey<MlDsa65>) {
         self.trusted_identity = Some(identity);
+    }
+
+    /// Set the trusted responder identity key.
+    /// The initiator calls this with Bob's verifying key so that σ_resp can be verified
+    /// inside pq_ratchet_decapsulate (Theorem 4.17, Freshness Condition 2b).
+    pub fn set_trusted_responder_identity(&mut self, identity: VerifyingKey<MlDsa65>) {
+        self.trusted_responder_identity = Some(identity);
     }
 
     pub fn identity_verifying_key(&self) -> VerifyingKey<MlDsa65> {
@@ -471,6 +510,9 @@ impl RatchetState {
     }
 
     /// 3.3.3 PQ Ratchet encapsulation (Bob side)
+    /// Implements Section 3.5.4 / Theorem 4.17: the responder signs
+    ///   σ_resp = ML-DSA.Sign(IK^DSA_sk_resp, m_resp)
+    /// where m_resp = "UpdateAuth-Resp" ∥ sid ∥ kem_id ∥ pq_pk ∥ ct ∥ epoch ∥ prev.
     pub fn pq_ratchet_encapsulate(
         &mut self,
         header: &RecoveryUpdateHeader,
@@ -485,30 +527,46 @@ impl RatchetState {
         let (ct, ss_pq) = header.pq_pk.encapsulate_with_rng(&mut rand::rng());
         let mut shared_secret = [0u8; 32];
         shared_secret.copy_from_slice(ss_pq.as_ref());
-        let ciphertext = <ml_kem::Ciphertext<MlKem768> as AsRef<[u8]>>::as_ref(&ct).to_vec();
+        let ciphertext_bytes = <ml_kem::Ciphertext<MlKem768> as AsRef<[u8]>>::as_ref(&ct).to_vec();
+
+        // Build and sign the response payload (σ_resp)
+        let resp_bytes = recovery_response_bytes(
+            &self.session_id,
+            &header.kem_id,
+            &header.pq_pk,
+            &ciphertext_bytes,
+            header.epoch,
+            &header.predecessor,
+        );
+        let response_signature = self.signing_key.sign(&resp_bytes);
+
         self.completed_kems.insert(
             header.kem_id,
             CompletedKem {
                 sequence: header.sequence,
                 shared_secret,
-                ciphertext,
+                ciphertext: ciphertext_bytes,
             },
         );
         self.drain_completed()?;
         Ok(RecoveryUpdateResponse {
             header: header.kem_id,
+            pq_pk: header.pq_pk.clone(),
             ciphertext: ct,
+            responder_identity_pk: self.signing_key.verifying_key().clone(),
+            response_signature,
         })
     }
 
-    /// 3.3.3 PQ Ratchet decapsulation (Alice side)
+    /// 3.3.3 PQ Ratchet decapsulation (Alice / initiator side)
+    /// Implements Theorem 4.17 Freshness Condition 2b:
+    ///   verify σ_resp under IK^DSA_pk_resp before mixing SS_PQ into the root key.
     /// The DecapsulationKey is consumed here — enforces one-time use and secret clearance.
-    /// SECURITY: Consuming the matching outstanding secret provides one-time decapsulation.
     pub fn pq_ratchet_decapsulate(
         &mut self,
         response: &RecoveryUpdateResponse,
     ) -> Result<(), CryptoError> {
-        let (sk, sequence) = {
+        let (sk, sequence, epoch, predecessor) = {
             let pending = self
                 .outstanding_kems
                 .get_mut(&response.header)
@@ -519,20 +577,45 @@ impl RatchetState {
                     .take()
                     .ok_or(CryptoError::DuplicateKemId)?,
                 pending.sequence,
+                // reuse epoch = sequence for this PoC (matches pq_ratchet_init)
+                pending.sequence,
+                self.transcript_hash,
             )
         };
-        // decapsulate() is infallible in ML-KEM (implicit rejection per FIPS 203 §7.3)
+
+        // --- Verify σ_resp (Theorem 4.17 / Section 3.5.4) ---
+        let ciphertext_bytes =
+            <ml_kem::Ciphertext<MlKem768> as AsRef<[u8]>>::as_ref(&response.ciphertext).to_vec();
+        let resp_bytes = recovery_response_bytes(
+            &self.session_id,
+            &response.header,
+            &response.pq_pk,
+            &ciphertext_bytes,
+            epoch,
+            &predecessor,
+        );
+        let responder_key = self
+            .trusted_responder_identity
+            .as_ref()
+            .unwrap_or(&response.responder_identity_pk);
+        if responder_key != &response.responder_identity_pk {
+            return Err(CryptoError::AuthenticationFailed);
+        }
+        response
+            .responder_identity_pk
+            .verify(&resp_bytes, &response.response_signature)
+            .map_err(|_| CryptoError::AuthenticationFailed)?;
+
+        // --- Decapsulate (infallible in ML-KEM, FIPS 203 §7.3 implicit rejection) ---
         let ss_pq = sk.decapsulate(&response.ciphertext);
         let mut shared_secret = [0u8; 32];
         shared_secret.copy_from_slice(ss_pq.as_ref());
-        let ciphertext =
-            <ml_kem::Ciphertext<MlKem768> as AsRef<[u8]>>::as_ref(&response.ciphertext).to_vec();
         self.completed_kems.insert(
             response.header,
             CompletedKem {
                 sequence,
                 shared_secret,
-                ciphertext,
+                ciphertext: ciphertext_bytes,
             },
         );
         self.drain_completed()?;
@@ -1011,7 +1094,10 @@ mod tests {
         let mut alice_state = RatchetState::new(&[1u8; 64], true);
         let mut bob_state = RatchetState::new(&[1u8; 64], false);
         bob_state.recv_chain_key = alice_state.send_chain_key;
+        // Bob verifies Alice's σ_init
         bob_state.set_trusted_identity(alice_state.identity_verifying_key());
+        // Alice verifies Bob's σ_resp (Theorem 4.17 Condition 2b)
+        alice_state.set_trusted_responder_identity(bob_state.identity_verifying_key());
 
         let header = alice_state.pq_ratchet_init().expect("Ratchet failed");
         let response = bob_state
@@ -1031,6 +1117,7 @@ mod tests {
         let mut bob = RatchetState::new(&[7u8; 64], false);
         bob.recv_chain_key = alice.send_chain_key;
         bob.set_trusted_identity(alice.identity_verifying_key());
+        alice.set_trusted_responder_identity(bob.identity_verifying_key());
 
         let first = alice.pq_ratchet_init().expect("first init failed");
         let second = alice.pq_ratchet_init().expect("second init failed");
@@ -1079,6 +1166,7 @@ mod tests {
         let mut alice = RatchetState::new(&[8u8; 64], true);
         let mut bob = RatchetState::new(&[8u8; 64], false);
         bob.set_trusted_identity(alice.identity_verifying_key());
+        alice.set_trusted_responder_identity(bob.identity_verifying_key());
 
         let mut header = alice.pq_ratchet_init().expect("init failed");
         let attacker = demo_signing_key();
@@ -1096,6 +1184,45 @@ mod tests {
             bob.pq_ratchet_encapsulate(&header),
             Err(CryptoError::AuthenticationFailed)
         ));
+    }
+
+    /// CLAIM (Paper Theorem 4.17 / Section 3.5.4):
+    /// A forged σ_resp from an attacker who controls the ratchet state but not
+    /// the responder's identity key must be rejected by the initiator.
+    #[test]
+    fn test_response_signature_authentication_is_verified() {
+        let mut alice = RatchetState::new(&[9u8; 64], true);
+        let mut bob = RatchetState::new(&[9u8; 64], false);
+        bob.set_trusted_identity(alice.identity_verifying_key());
+        alice.set_trusted_responder_identity(bob.identity_verifying_key());
+
+        let header = alice.pq_ratchet_init().expect("init failed");
+        let mut response = bob
+            .pq_ratchet_encapsulate(&header)
+            .expect("encaps failed");
+
+        // Attacker forges σ_resp using a fresh (wrong) signing key
+        let attacker = demo_signing_key();
+        let ct_bytes =
+            <ml_kem::Ciphertext<MlKem768> as AsRef<[u8]>>::as_ref(&response.ciphertext).to_vec();
+        let forged_payload = recovery_response_bytes(
+            &alice.session_id,
+            &response.header,
+            &response.pq_pk,
+            &ct_bytes,
+            header.epoch,
+            &header.predecessor,
+        );
+        response.response_signature = attacker.sign(&forged_payload);
+
+        assert!(
+            matches!(
+                alice.pq_ratchet_decapsulate(&response),
+                Err(CryptoError::AuthenticationFailed)
+            ),
+            "FAILED: Forged σ_resp was accepted — Theorem 4.17 Condition 2b violated"
+        );
+        println!("  ✅ Response signature rejection verified: forged σ_resp correctly rejected");
     }
 
     // ============================================================================
@@ -1187,16 +1314,18 @@ mod tests {
         println!("  ✅ Forward secrecy verified: MKs are unique and non-repeating");
     }
 
-    /// CLAIM (Paper §3.3.3): Post-Compromise Security (PCS)
+    /// CLAIM (Paper §3.3.3 / Theorem 4.17): Post-Compromise Security (PCS)
     /// After decapsulation, the secret key must be dropped and cannot be reused.
-    /// This prevents key recovery if the decapsulated value is compromised.
+    /// Both σ_init (initiator) and σ_resp (responder) must be present and valid.
     #[test]
     fn test_pcs_via_secret_erasure() {
         let mut alice_state = RatchetState::new(&[1u8; 64], true);
         let mut bob_state = RatchetState::new(&[1u8; 64], false);
         bob_state.recv_chain_key = alice_state.send_chain_key;
+        bob_state.set_trusted_identity(alice_state.identity_verifying_key());
+        alice_state.set_trusted_responder_identity(bob_state.identity_verifying_key());
 
-        // Before decapsulation: secret key should exist
+        // Before initiation: KEM buffer must be empty
         assert!(
             alice_state.outstanding_kems.is_empty(),
             "KEM buffer should start empty"
@@ -1209,27 +1338,29 @@ mod tests {
             "KEM entry should be buffered"
         );
 
+        // Bob verifies σ_init and signs σ_resp
         let response = bob_state
             .pq_ratchet_encapsulate(&header)
             .expect("Encaps failed");
+        // Alice verifies σ_resp then decapsulates
         alice_state
             .pq_ratchet_decapsulate(&response)
             .expect("Decaps failed");
 
-        // After decapsulation: secret key must be dropped
+        // After decapsulation: secret key must be retired/dropped
         assert!(
             alice_state.outstanding_kems.is_empty(),
             "FAILED: KEM entry not retired after decapsulation"
         );
 
-        // CLAIM: Attempting to use the key again should fail
+        // CLAIM: Replay of the response must fail (one-time use)
         let result = alice_state.pq_ratchet_decapsulate(&response);
         assert!(
             result.is_err(),
             "FAILED: Decapsulation succeeded after key was dropped — PCS violated"
         );
 
-        println!("  ✅ Post-Compromise Security verified: Secret key properly erased");
+        println!("  ✅ Post-Compromise Security verified: Secret key properly erased, replay rejected");
     }
 
     /// CLAIM (Paper §3.2): Hybrid SS Concatenation

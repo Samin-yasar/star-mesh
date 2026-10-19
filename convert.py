@@ -383,7 +383,28 @@ def convert_latex_to_md(tex_path, aux_path, md_path):
             table_lines.append(lines[i])
             table_text = "".join(table_lines)
 
-            if "tab:primitives" in table_text:
+            if "tab:mixnet_sim" in table_text:
+                md_table = """
+| Load ($\lambda$) (pkts/slot) | Churn Rate (fraction/slot) | Packet MTU Violations | Delivery Rate | p95 Delay (slots) | Entry–Exit Linkability |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| 1.0 | 0.0 | **0** | 100.0% | 3.0 | 12.8% |
+| 5.0 | 0.0 | **0** | 100.0% | 4.0 | 3.5% |
+| 10.0 | 0.0 | **0** | 95.1% | 279.0 | 2.2% |
+| 20.0 | 0.0 | **0** | 31.3% | 3,258.0 | 4.7% |
+| 1.0 | 0.1 | **0** | 65.3% | 3.0 | 5.4% |
+| 5.0 | 0.1 | **0** | 62.8% | 4.0 | 0.8% |
+| 10.0 | 0.1 | **0** | 52.1% | 7.0 | 3.6% |
+| 1.0 | 0.2 | **0** | 39.7% | 3.0 | 2.1% |
+| 5.0 | 0.2 | **0** | 38.3% | 3.0 | 4.6% |
+| 10.0 | 0.2 | **0** | 31.8% | 5.0 | 2.1% |
+| 1.0 | 0.3 | **0** | 23.9% | 3.0 | 0.7% |
+| 5.0 | 0.3 | **0** | 22.8% | 3.0 | 2.4% |
+| 10.0 | 0.3 | **0** | 19.1% | 4.0 | 2.3% |
+
+*Table 1: Empirical mixnet queue simulation results for the signed ratchet design across 13 simulation runs (30 nodes, 3 hops, capacity $C=2$ pkts/node/slot, 1{,}500-byte MTU, 4 fragments per signed update, from `poc/python/mixnet_sim.py`).*
+"""
+                output.append(md_table)
+            elif "tab:primitives" in table_text:
                 md_table = """
 | Primitive | Public Key | Ciphertext / DH Output | Shared Secret |
 | :--- | :--- | :--- | :--- |
@@ -391,7 +412,7 @@ def convert_latex_to_md(tex_path, aux_path, md_path):
 | ML-KEM-768 | 1184 B | 1088 B | 32 B |
 | ML-DSA-65 | 1952 B | N/A (sig: 3,309 B) | N/A |
 
-*Table 1: Primitive sizes relevant to Star-Mesh.*
+*Table 2: Primitive sizes relevant to Star-Mesh.*
 """
                 output.append(md_table)
             elif "tab:overhead" in table_text:
@@ -404,7 +425,7 @@ def convert_latex_to_md(tex_path, aux_path, md_path):
 | Ratchet header (PQ step) | N/A | $+1,184$ (KEM pk) | $+1,184$ |
 | Ratchet reply (PQ step) | N/A | $+1,088$ (KEM ct) | $+1,088$ |
 
-*Table 2: Bandwidth overhead comparison. Classical Signal handshake size is derived from the X3DH specification [4](#marlinspike_x3dh): two 32-byte X25519 public keys (IK and EK), one 32-byte SPK, one 32-byte OTPK, and protocol framing, totalling approximately 150 bytes (118 bytes without an OTPK). Star-Mesh handshake figures follow the $M_0$ definition of Section 3.4: $IK^{DSA}_{pk,A}$ (1,952 B) $+$ $IK^{DH}_{pk,A}$ (32 B) $+$ $EK_{pk,A}$ (32 B) $+$ $ct_1$ (1,088 B) $+$ optionally $ct_2$ (1,088 B) $+$ $\\approx$32 B framing/identifiers. The 1,952-byte $IK^{DSA}_{pk,A}$ is transmitted on every handshake as specified; implementations that cache a correspondent's identity key after first contact can amortise this cost across a relationship rather than a session.*
+*Table 3: Bandwidth overhead comparison. Classical Signal handshake size is derived from the X3DH specification [4](#marlinspike_x3dh): two 32-byte X25519 public keys (IK and EK), one 32-byte SPK, one 32-byte OTPK, and protocol framing, totalling approximately 150 bytes (118 bytes without an OTPK). Star-Mesh handshake figures follow the $M_0$ definition of Section 3.4: $IK^{DSA}_{pk,A}$ (1,952 B) $+$ $IK^{DH}_{pk,A}$ (32 B) $+$ $EK_{pk,A}$ (32 B) $+$ $ct_1$ (1,088 B) $+$ optionally $ct_2$ (1,088 B) $+$ $\\approx$32 B framing/identifiers. The 1,952-byte $IK^{DSA}_{pk,A}$ is transmitted on every handshake as specified; implementations that cache a correspondent's identity key after first contact can amortise this cost across a relationship rather than a session.*
 """
                 output.append(md_table)
             i += 1
