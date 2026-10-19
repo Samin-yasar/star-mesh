@@ -151,10 +151,12 @@ an already exposed skipped key, the bound is
 \]
 Here $Q_{\mathrm{sess}},Q_{\mathrm{upd}},Q_{\mathrm{KEM}},Q_{\mathrm{KDF}}$ are explicit
 polynomial query bounds defined in Section~\ref{sec:prelim}; $\Adv^{\mathrm{hi}}_{\mathrm{KDF}}$
-is the dual-PRF / extractor KDF advantage defined there.  Crucially, PCS holds only
+is the dual-PRF / extractor KDF advantage defined there.  Crucially, post-compromise security against active adversaries holds only
 if the identity signing key remains uncompromised across state compromise; if an adversary exfiltrates
-the identity key alongside live ratchet state, post-compromise recovery is unachievable because the
-adversary can forge update signatures.  The ratchet heals continuous message confidentiality after
+the identity key alongside live ratchet state and actively injects forged update signatures,
+recovery is unachievable. (Against a passive-after-compromise adversary who only eavesdrops post-compromise
+without injecting, healing succeeds under ML-KEM IND-CCA2, a fresh RNG, and secure deletion even if the identity key was exposed.)
+The ratchet heals continuous message confidentiality after
 transient state leaks, relying on the hardware-isolated identity key strictly to authenticate the
 healing KEM transition against active substitution.  Before a fresh KEM update completes, a
 quantum adversary who compromises live state recovers intermediate messages across the pre-recovery
@@ -218,9 +220,12 @@ target KEM secret, old root/chain keys, and excluded skipped keys before the tar
 is tested.  The security model explicitly separates ephemeral session state from the long-term
 identity signing key: the state compromise query returns volatile runtime state (ephemeral
 chain/root keys, entropy pool, pending ciphertexts, and cached message keys) but does not reveal
-the ML-DSA signing key.  PCS holds strictly under the condition that the identity signing key
+the ML-DSA signing key.  Against an active adversary, PCS holds strictly under the condition that the identity signing key
 remains uncompromised (e.g., protected by a hardware security module or secure enclave); if total
-device expropriation compromises the signing key, recovery is impossible.  The ratchet's PCS adds
+device expropriation compromises the signing key and the adversary actively tampers with the healing update,
+recovery is unachievable. (Conversely, against a passive-after-compromise adversary who only eavesdrops
+post-compromise without injecting, healing succeeds under ML-KEM IND-CCA2, post-$t_{\mathrm{rec}}$ RNG freshness,
+and state erasure without requiring identity key isolation.)  The ratchet's PCS adds
 critical protection beyond static identity keys: static identity keys provide authentication rather
 than confidentiality, whereas the ratchet continuously refreshes the quantum-resistant symmetric
 confidentiality root, using the hardware-isolated identity key strictly to prevent active MITM
@@ -476,7 +481,7 @@ Thus, Category~3 (ML-KEM-768 and ML-DSA-65) is selected as the default parameter
 \begin{enumerate}
   \item \textbf{Intermediate Conversational Messages Fit Under MTU:} Routine messages ($\Delta - 1$ out of every $\Delta$ messages) carry only 32-byte classical X25519 ratchet headers and application payloads ($192$~B payload $+$ $32$~B header $+$ $96$~B Sphinx framing $= 320$~B).  These fit comfortably within a standard $1{,}500$-byte Ethernet/Sphinx MTU without fragmentation.
   \item \textbf{Periodic Signed Ratchet Updates Fragment into 4-Packet Trains:} Because state compromise is silent and undetectable, achieving post-compromise security (Theorem~\ref{thm:single-update-pcs}) mandates that \emph{every} periodic KEM update carries mutual ML-DSA-65 signatures ($\sigma_{\mathrm{init}}$ and $\sigma_{\mathrm{resp}}$, $3{,}309$~bytes each).  The initiator payload ($1{,}184$~B ML-KEM pk $+$ $3{,}309$~B signature $+$ $192$~B application payload $= 4{,}685$~B) and responder reply ($1{,}088$~B ML-KEM ct $+$ $3{,}309$~B signature $+$ $192$~B application payload $= 4{,}589$~B) exceed $1{,}500$~B and are fragmented by the transport layer into trains of 4 Sphinx packets per update direction.
-  \item \textbf{Handshake and Pre-Key Bundle Fragmentation:} Initial handshake messages ($M_0 = 4{,}256$~B, consisting of $4{,}224$~B raw cryptographic payload plus $32$~B framing/identifiers) and signed DHT pre-key bundles (including 3{,}309-byte ML-DSA-65 signatures) also exceed $1{,}500$~B.  With a per-packet Sphinx payload capacity of $1{,}404$~B ($1{,}500$-byte MTU minus $96$-byte Sphinx header), transmitting $M_0$ requires a 4-packet Sphinx train ($\lceil 4{,}256 / 1{,}404 \rceil = 4$, and even the raw cryptographic core requires $\lceil 4{,}224 / 1{,}404 \rceil = 4$) or asynchronous DHT mailbox deposits.
+  \item \textbf{Handshake and Pre-Key Bundle Fragmentation:} Initial handshake messages ($M_0 = 7{,}565$~B, consisting of $7{,}533$~B raw cryptographic payload plus $32$~B framing/identifiers, incorporating the 3{,}309-byte ML-DSA-65 initiator signature $\sigma_0$; or $6{,}477$~B in the SPK-only fallback, $6{,}445$~B raw) and signed DHT pre-key bundles (including 3{,}309-byte ML-DSA-65 signatures) also exceed $1{,}500$~B.  With a per-packet Sphinx payload capacity of $1{,}404$~B ($1{,}500$-byte MTU minus $96$-byte Sphinx header), transmitting $M_0$ requires a 6-packet Sphinx train ($\lceil 7{,}565 / 1{,}404 \rceil = 6$, or 5 packets for SPK-only fallback: $\lceil 6{,}477 / 1{,}404 \rceil = 5$) or asynchronous DHT mailbox deposits.
 \end{enumerate}
 
 % ============================================================
@@ -797,7 +802,7 @@ post-compromise healing.  Consequently, to satisfy Theorem~\ref{thm:single-updat
           \sigma_{\mathrm{init}} &\getsr \MLDSA.\Sign\bigl(IK^{DSA}_{sk,\mathrm{init}},\, m_{\mathrm{init}}\bigr).
         \end{align*}
         The initiator attaches $(kem\_id, PQ^{loc}_{pk}, \sigma_{\mathrm{init}})$ to the outgoing message.
-  \item \textbf{Verification, Encapsulation, and Responder Advance (PQ-responder):}
+  \item \textbf{Verification, Encapsulation, and Staged Responder Transition (PQ-responder):}
       Upon receiving the message, the PQ-responder looks up $kem\_id$, rejects duplicate or retired
       identifiers, and verifies $\sigma_{\mathrm{init}}$:
       \[
@@ -809,20 +814,28 @@ post-compromise healing.  Consequently, to satisfy Theorem~\ref{thm:single-updat
         m_{\mathrm{resp}} &\coloneqq \strlit{UpdateAuth-Resp} \,\|\, sid \,\|\, kem\_id \,\|\, PQ^{loc}_{pk} \,\|\, PQ^{pending}_{ct} \,\|\, epoch \,\|\, prev, \\
         \sigma_{\mathrm{resp}} &\getsr \MLDSA.\Sign\bigl(IK^{DSA}_{sk,\mathrm{resp}},\, m_{\mathrm{resp}}\bigr).
       \end{align*}
-      The responder then executes the post-quantum root and directional chain update:
+      The responder computes the candidate post-quantum root and directional chain update:
       \begin{align*}
-        EP' &\gets \HKDF\bigl(SS_{PQ},\; EP,\;
+        EP_{\mathrm{staged}} &\gets \HKDF\bigl(SS_{PQ},\; EP,\;
                           \strlit{StarMesh-EntropyPool} \,\|\, PQ^{pending}_{ct},\; 32\bigr), \\
-        (RK',\, \vec{CK}) &\gets \HKDF\bigl(SS_{PQ},\; EP',\;
+        (RK_{\mathrm{staged}},\, \vec{CK}_{\mathrm{staged}}) &\gets \HKDF\bigl(SS_{PQ},\; EP_{\mathrm{staged}},\;
                                               \strlit{StarMesh-PQ-RK},\; 96\bigr),
       \end{align*}
-      where $\vec{CK} = (CK_{A\to B}, CK_{B\to A})$.
-      The responder synchronizes its directional chains and root key:
-      \[
-        RK \leftarrow RK', \quad CK_r \leftarrow CK_{A\to B}, \quad CK_s \leftarrow CK_{B\to A}, \quad EP \leftarrow EP',
-      \]
-      zeroizes $SS_{PQ}$ and old root/chain keys, and resets $\mathsf{pq\_step\_counter} \leftarrow \Delta$.
+      where $\vec{CK}_{\mathrm{staged}} = (CK_{A\to B}^{\mathrm{staged}}, CK_{B\to A}^{\mathrm{staged}})$.
+      Crucially, the responder does \emph{not} immediately overwrite active root or chain keys.
+      Instead, it buffers the staged update in $\mathsf{PQ}_{\mathrm{staged}}$ and continues to use active $CK_r$,
+      ensuring initiator messages already in flight under the current chain remain decryptable.
       The responder attaches $(kem\_id, PQ^{pending}_{ct}, \sigma_{\mathrm{resp}})$ to its reply.
+      Upon receiving the first message authenticated under the new chain $CK_{A\to B}^{\mathrm{staged}}$ (confirming that
+      the initiator received the reply and advanced), the responder commits:
+      \[
+        RK \leftarrow RK_{\mathrm{staged}}, \quad CK_s \leftarrow CK_{B\to A}^{\mathrm{staged}}, \quad EP \leftarrow EP_{\mathrm{staged}},
+      \]
+      promotes $CK_r \leftarrow CK_{A\to B}^{\mathrm{staged}}$, retains the prior receiving chain as $CK_r^{\mathrm{prev}}$
+      until trailing skipped messages are resolved, zeroizes intermediate secrets, and resets $\mathsf{pq\_step\_counter} \leftarrow \Delta$.
+      If the reply is lost and the initiator times out, the initiator retires $kem\_id$ without updating $RK$;
+      upon observing a retransmitted or fresh proposal, the responder clears the uncommitted $\mathsf{PQ}_{\mathrm{staged}}$
+      entry without modifying $RK$, preventing desynchronization.
   \item \textbf{Response Verification and Initiator Advance (PQ-initiator):} Upon receiving the reply, the
       PQ-initiator looks up $kem\_id$ in $PQ^{outstanding}$ and verifies $\sigma_{\mathrm{resp}}$:
       \[
@@ -843,6 +856,7 @@ post-compromise healing.  Consequently, to satisfy Theorem~\ref{thm:single-updat
       \[
         RK \leftarrow RK', \quad CK_s \leftarrow CK_{A\to B}, \quad CK_r \leftarrow CK_{B\to A}, \quad EP \leftarrow EP',
       \]
+      retaining the prior sending/receiving chain context for in-flight message transitions,
       applies completed updates in increasing authenticated sequence, retires $kem\_id$,
       zeroizes $PQ^{loc}_{sk}$, $SS_{PQ}$, and old keys, and resets $\mathsf{pq\_step\_counter} \leftarrow \Delta$.
       A duplicate response never causes a second root-key update; a timeout retires the identifier without changing
@@ -850,13 +864,26 @@ post-compromise healing.  Consequently, to satisfy Theorem~\ref{thm:single-updat
       state machine is specified in Appendix~\ref{sec:appendix-statemachine}.
 \end{enumerate}
 
-\begin{remark}[Symmetry and Concurrent PQ Steps]
+\begin{remark}[Symmetry, Concurrent PQ Steps, and Canonical Tie-Breaking]
 \label{rem:concurrent}
 Both parties maintain independent $\mathsf{pq\_step\_counter}$ values.  It is possible for
-both counters to reach zero concurrently.  In this case both parties independently generate a
-fresh $PQ^{loc}_{pk}$ and act as simultaneous PQ-initiators for separate round-trips that
-proceed in parallel.  Each completes independently; the result is two consecutive PQ-induced
-root-key updates, which only strengthens the PCS guarantee.
+both counters to reach zero concurrently, prompting both parties to independently emit proposals
+$U_A = (\mathsf{kem\_id}_A, PQ^{loc}_{pk,A}, \sigma_{\mathrm{init},A})$ and
+$U_B = (\mathsf{kem\_id}_B, PQ^{loc}_{pk,B}, \sigma_{\mathrm{init},B})$.
+Because ML-KEM shared secrets are non-commutative and sequential HKDF evaluations are order-dependent,
+applying the two updates in arbitrary network arrival order would cause root-key divergence whenever
+packets interleave differently at the two endpoints.
+To guarantee deterministic convergence, both endpoints enforce a canonical tie-break rule:
+the updates are sorted lexicographically by their unique 32-byte authenticated identifiers:
+\[
+  U_{(1)} \coloneqq \arg\min_{U \in \{U_A, U_B\}} \mathsf{kem\_id}(U), \quad
+  U_{(2)} \coloneqq \arg\max_{U \in \{U_A, U_B\}} \mathsf{kem\_id}(U),
+\]
+with ties broken by comparing initiator identity keys $IK^{DSA}_{pk}$.
+Both endpoints serialize the derivations in this identical canonical order: $U_{(1)}$ is applied first
+to $(RK, EP)$ to produce intermediate $(RK_1, EP_1)$, and $U_{(2)}$ is applied second chaining directly
+from $(RK_1, EP_1)$ to yield the final active root key $RK_2$ and directional chain keys $\vec{CK}_2$.
+Regardless of arrival order, both endpoints compute the identical final state.
 \end{remark}
 
 \begin{remark}[Pre-Recovery Exposure Window and Justification of $\Delta = 50$ (Informal)]
@@ -1282,6 +1309,8 @@ The adversary $\calA_{\mathrm{quant}}$ may adaptively query the following oracle
   \item $\calO^{Reveal}(i, s)$: Returns the current ratchet state $\mathcal{S}$ of session
         $\pi^s_i$ (simulating device compromise).
   \item $\calO^{RevealLTK}(i)$: Returns the long-term secret keys of party $P_i$.
+  \item $\calO^{Sign}(i, m)$: Invokes the hardware-isolated keystore/enclave of party $P_i$ to
+        return an ML-DSA-65 signature on message $m$ under $IK^{DSA}_{sk,i}$.
   \item $\calO^{RevealRNG}(i, t)$: Reveals or controls the output of $P_i$'s random number
         generator at time $t$.  This models a compromised OS RNG, a side-channel attack, or
         any mechanism by which the adversary learns or influences fresh randomness
@@ -1306,14 +1335,17 @@ revealed material.  Formally, epoch $e$ is \emph{not fresh} if any of the follow
   \item $\calO^{RevealRNG}(i, t)$ was queried for any time $t$ at which a fresh ephemeral
         secret (ephemeral DH key, ephemeral ML-KEM keypair, or one-time pre-key) used to derive
         $MK_e$ was sampled.
+  \item $\calO^{Sign}(i, \cdot)$ or $\calO^{Sign}(j, \cdot)$ was queried during the compromise window
+        $[t_{\mathrm{comp}}, t_{\mathrm{rec}}]$ on an update transcript ($\strlit{UpdateAuth-Init}$ or
+        $\strlit{UpdateAuth-Resp}$) corresponding to the post-compromise ratchet step establishing epoch $e$.
 \end{enumerate}
 \end{definition}
 
 \begin{remark}
-Condition~3 integrates RNG compromise into the freshness definition, replacing the ad-hoc RNG
-boundary used in prior formulations.  It ensures that the PCS game (Definition~\ref{def:pcs})
-does not need to re-define the RNG boundary separately: any session whose PQ ratchet keypair
-was sampled during a compromised-RNG window is simply not fresh for the affected epochs.
+Conditions~3 and 4 integrate RNG compromise and enclave signing-oracle isolation directly into the freshness definition,
+operationalizing Assumptions~\ref{asm:rng} and \ref{asm:idkey-isolation}.  They ensure that the PCS game (Definition~\ref{def:pcs})
+does not need to re-define the RNG or signing-oracle boundary separately: any session whose PQ ratchet keypair
+was sampled during a compromised-RNG window, or whose update transcript was forged via enclave oracle access during state compromise, is simply not fresh for the affected epochs.
 \end{remark}
 
 \subsection{Post-Quantum Forward Secrecy (PQ-FS) Game}
@@ -1409,6 +1441,10 @@ for each endpoint.  The adversary has quantum polynomially many adaptive queries
         and all randomness already sampled.  Erased values are not returned.
   \item $\mathsf{RevealLTK}(P)$: return the ML-DSA signing and other long-term secret keys.
         The target game aborts if the target update's signing key is revealed.
+  \item $\mathsf{Sign}(P, m)$: return an ML-DSA-65 signature on $m$ under party $P$'s long-term identity
+        signing key $IK^{DSA}_{sk,P}$.  The target game aborts if $\mathsf{Sign}(P, \cdot)$ is queried on a message
+        prefixing or matching $\strlit{UpdateAuth-Init}$ or $\strlit{UpdateAuth-Resp}$ for the target session update
+        during the compromise window $[t_{\mathrm{comp}}, t_{\mathrm{rec}}]$.
   \item $\mathsf{RevealRNG}(P,t)$: reveal or control the randomness used at time $t$.  The
         target game aborts if this query covers generation of the target KEM keypair.
   \item $\mathsf{RevealKEM}(\mathsf{kem\_id})$: return an outstanding KEM secret key.  The
@@ -1424,7 +1460,9 @@ The target update $(\mathsf{kem\_id}^*,PQ_{pk}^*,ct^*)$ is fresh only if:
   \item its KEM keypair is generated after $t_{\mathrm{rec}}$ with independent uniform
         randomness and no $\mathsf{RevealRNG}$ query covers that generation;
   \item both update messages are authenticated under identity keys not returned by
-        $\mathsf{RevealLTK}$: (a)~$\sigma_{\mathrm{init}}$ on
+        $\mathsf{RevealLTK}$, and neither party's signing oracle was queried via $\mathsf{Sign}$ on the
+        target update messages during the compromise window $[t_{\mathrm{comp}}, t_{\mathrm{rec}}]$:
+        (a)~$\sigma_{\mathrm{init}}$ on
         $(\strlit{UpdateAuth-Init}, \allowbreak \mathsf{sid}, \allowbreak \mathsf{kem\_id}^*, \allowbreak PQ_{pk}^*, \allowbreak \mathsf{epoch}, \allowbreak \mathsf{prev})$
         verifies under endpoint~$A$'s identity key;
         (b)~$\sigma_{\mathrm{resp}}$ on
@@ -1716,10 +1754,18 @@ Fifth, and critically, \emph{identity key survival and signing-oracle isolation}
 proceeds in two cases.
 \begin{itemize}
   \item \textbf{Passive-after-compromise adversary}: an adversary that reads session state at
-    $t_{comp}$ but thereafter makes no further queries (no signing-oracle access, no active
-    injections).  In this case, healing depends only on KEM IND-CCA2 and a clean RNG at
-    $t_{rec}$; $IK^{DSA}_{sk}$ need not remain in hardware-isolated storage for
-    post-compromise security to hold against this weaker adversary.
+    $t_{comp}$ but thereafter performs no active injections, modifications, or signing-oracle queries.
+    Against this adversary class, healing does not require identity key isolation ($IK^{DSA}_{sk}$ may be exposed).
+    However, recovery is \emph{not unconditional}: it strictly depends on:
+    (i)~ML-KEM-768 IND-CCA2 security,
+    (ii)~RNG integrity after $t_{rec}$ (Assumption~\ref{asm:rng}), and
+    (iii)~the deletion schedule (Assumption~\ref{asm:deletion}).
+    \emph{Proof sketch (passive case):} Because the adversary is passive post-compromise, honest endpoints exchange authentic $PQ^{loc}_{pk}$ and $ct$.
+    By Assumption~\ref{asm:rng}, $PQ^{loc}_{sk}$ is sampled with uniform randomness unobserved by the adversary.
+    By ML-KEM-768 IND-CCA2 security, the shared secret $SS_{PQ}$ is computationally indistinguishable from a uniform random string.
+    By Assumption~\ref{asm:kdf-hi}, HKDF extraction with uniform $SS_{PQ}$ produces an updated entropy pool $EP'$ and new keys $(RK', \vec{CK})$ that are pseudorandom and computationally independent of the compromised pre-recovery root key.
+    By Assumption~\ref{asm:deletion}, $PQ^{loc}_{sk}$ and pre-recovery keys are zeroized upon update completion.
+    Confidentiality of post-update epochs is thus restored without relying on DSA unforgeability.
   \item \textbf{Active adversary}: one that continues to inject, modify, or replay messages
     after $t_{comp}$, or that queries the enclave signing oracle during the compromise window.
     Against this stronger model, this corollary requires the full
@@ -1729,8 +1775,7 @@ proceeds in two cases.
     $\sigma_{\mathrm{resp}}$ indefinitely, and healing cannot be guaranteed against this
     adversary class.
 \end{itemize}
-PCS holds unconditionally against a passive-after-compromise adversary, and under
-Assumption~\ref{asm:idkey-isolation} against an active adversary.
+In summary, PCS holds against a passive-after-compromise adversary under ML-KEM IND-CCA2, RNG recovery, and erasure enforcement, and additionally requires Assumption~\ref{asm:idkey-isolation} against an active adversary.
 \end{corollary}
 
 % ============================================================
@@ -1864,8 +1909,8 @@ The simulation findings validate the architectural hypothesis:
         Under churn ($10\%$--$30\%$), delivery rate degrades proportionally to route interruption,
         highlighting that transport-layer reliability requires end-to-end ACKs and retransmissions.
   \item \textbf{Scope Limitation:} We emphasize that this queue model simulates steady-state ratchet
-        exchanges; one-time handshake messages ($M_0 = 4{,}256$~B) and signed pre-key bundles
-        require multi-packet Sphinx trains (4 fragments for $M_0$ as $\lceil 4{,}256 / 1{,}404 \rceil = 4$) or direct mailbox deposition.
+        exchanges; one-time handshake messages ($M_0 = 7{,}565$~B; $6{,}477$~B for SPK-only) and signed pre-key bundles
+        require multi-packet Sphinx trains (6 fragments for $M_0$ as $\lceil 7{,}565 / 1{,}404 \rceil = 6$, or 5 fragments for SPK-only fallback as $\lceil 6{,}477 / 1{,}404 \rceil = 5$) or direct mailbox deposition.
 \end{enumerate}
 
 % ============================================================
@@ -1905,10 +1950,10 @@ totalling approximately 150 bytes with an initial encrypted message (118 bytes w
 Bob does not receive his own SPK or OTPK back from Alice.  Star-Mesh handshake figures follow the
 $M_0$ definition of Section~\ref{sec:x3dh}: $IK^{DSA}_{pk,A}$ (1{,}952~B) $+$ $IK^{DH}_{pk,A}$ (32~B) $+$
 $EK_{pk,A}$ (32~B) $+$ $ct_1$ (1{,}088~B) $+$ optionally $ct_2$ (1{,}088~B) $+$
-32~B confirmation tag $+$ 32~B framing/identifiers $= 4{,}256$~B with OTPK ($4{,}224$~B raw
-cryptographic payload), $3{,}168$~B without ($3{,}136$~B raw cryptographic payload).  With a 1{,}404-byte
-Sphinx payload capacity, transmitting $M_0$ requires a 4-packet Sphinx train
-($\lceil 4{,}256 / 1{,}404 \rceil = 4$).  The 1{,}952-byte $IK^{DSA}_{pk,A}$ is transmitted on
+32~B confirmation tag $+$ $\sigma_0$ signature (3{,}309~B) $+$ 32~B framing/identifiers $= 7{,}565$~B with OTPK ($7{,}533$~B raw
+cryptographic payload), $6{,}477$~B without ($6{,}445$~B raw cryptographic payload).  With a 1{,}404-byte
+Sphinx payload capacity, transmitting $M_0$ requires a 6-packet Sphinx train
+($\lceil 7{,}565 / 1{,}404 \rceil = 6$, and 5 packets for SPK-only: $\lceil 6{,}477 / 1{,}404 \rceil = 5$).  The 1{,}952-byte $IK^{DSA}_{pk,A}$ is transmitted on
 \emph{every} handshake as specified; implementations that cache a correspondent's identity
 key after first contact can amortise this cost across a relationship rather than a session.}
 \label{tab:overhead}
@@ -1918,8 +1963,8 @@ key after first contact can amortise this cost across a relationship rather than
 \textbf{Component}               & \textbf{Classical (Signal)} & \textbf{Star-Mesh} & \textbf{Overhead} \\
 \midrule
 \multicolumn{4}{l}{\footnotesize Star-Mesh handshake rows include the 32-byte $tag_A$ confirmation tag.} \\
-Handshake, with OTPK (bytes)     & $\approx 150$ \cite{marlinspike_x3dh} & $\approx 4{,}256$ & $+4{,}106$ \\
-Handshake, SPK-only fallback     & $\approx 118$ \cite{marlinspike_x3dh} & $\approx 3{,}168$ & $+3{,}050$ \\
+Handshake, with OTPK (bytes)     & $\approx 150$ \cite{marlinspike_x3dh} & $\approx 7{,}565$ & $+7{,}415$ \\
+Handshake, SPK-only fallback     & $\approx 118$ \cite{marlinspike_x3dh} & $\approx 6{,}477$ & $+6{,}359$ \\
 Ratchet header (non-PQ step)     & 32 (X25519 pk)              & 32 (X25519 pk)     & $0$ \\
 Ratchet step, unsigned (raw KEM pk)   & N/A                   & $+1{,}184$ (KEM pk) & $+1{,}184$ \\
 Ratchet reply, unsigned (raw KEM ct)  & N/A                   & $+1{,}088$ (KEM ct) & $+1{,}088$ \\
@@ -1994,13 +2039,13 @@ are computed over a single run.  The figures should therefore be read as indicat
 performance magnitudes rather than confidence-bounded latency guarantees.  Under this
 platform:
 \begin{itemize}
-  \item \textbf{PQ-X3DH Handshake} (initiator + responder): mean execution time of $793.71\,\mu\text{s}$
-        (std dev: $36.71\,\mu\text{s}$; p50: $787.17\,\mu\text{s}$; p95: $803.13\,\mu\text{s}$; p99: $1{,}032.75\,\mu\text{s}$).
+  \item \textbf{PQ-X3DH Handshake} (initiator + responder): mean execution time of $1{,}530.23\,\mu\text{s}$ ($\approx 1.53\,\text{ms}$;
+        std dev: $487.57\,\mu\text{s}$; p50: $1{,}367.29\,\mu\text{s}$; p95: $2{,}552.88\,\mu\text{s}$; p99: $3{,}430.04\,\mu\text{s}$).
   \item \textbf{PQ Ratchet Round-trip} (init + encaps + decaps with mutual ML-DSA-65 signing and verification): mean execution time of $1{,}530.92\,\mu\text{s}$ ($\approx 1.53\,\text{ms}$;
         std dev: $669.22\,\mu\text{s}$; p50: $1{,}381.96\,\mu\text{s}$; p95: $2{,}847.63\,\mu\text{s}$; p99: $3{,}712.83\,\mu\text{s}$).
 \end{itemize}
 These low-latency execution times confirm the computational practicality of the scheme for consumer endpoints.
-The handshake latency includes four ML-KEM-768 operations (two encapsulations by Alice and two decapsulations by Bob for $ct_1$ and $ct_2$ in the full handshake with OTPK),
+The handshake latency includes ML-DSA-65 signing ($\sigma_0$) by Alice and signature verification by Bob, four ML-KEM-768 operations (two encapsulations by Alice and two decapsulations by Bob for $ct_1$ and $ct_2$ in the full handshake with OTPK),
 four X25519 scalar multiplications, and KDF/hash logic. The ratchet round-trip includes
 one ML-KEM-768 key generation, encapsulation, and decapsulation, HKDF root mixing, and mutual
 ML-DSA-65 signature generation and verification ($\sigma_{\mathrm{init}}$ and $\sigma_{\mathrm{resp}}$)
@@ -2037,11 +2082,14 @@ We consolidate the protocol's assumptions and known limitations here for clarity
         from $t_{rec}$ onward.  A compromised RNG during PQ ratchet key generation makes PCS
         unachievable for that update.
   \item \textbf{Identity key isolation across state compromise} (Assumption~\ref{asm:idkey-isolation}):
-        \emph{PCS holds only if the identity signing key ($IK^{DSA}_{sk}$) remains uncompromised during
-        and after ephemeral state compromise.}  On a single, unprotected device this key and the session
-        state occupy the same memory; total device expropriation would leak both, making recovery
-        impossible.  This assumption requires the identity key to reside in a hardware-isolated environment
-        (HSM, secure enclave, or OS-protected keystore) that is not returned by the Corrupt oracle.
+        \emph{Against active adversaries, PCS holds only if the identity signing key ($IK^{DSA}_{sk}$) remains uncompromised during
+        and after ephemeral state compromise.}  On an unprotected device, total device expropriation leaking both session memory
+        and the identity signing key allows an active adversary to forge update signatures, rendering recovery unachievable
+        against active tampering.  This assumption requires the identity key to reside in a hardware-isolated environment
+        (HSM, secure enclave, or protected keystore) inaccessible to the Corrupt oracle.  (In contrast, against a
+        passive-after-compromise adversary who only eavesdrops post-compromise, recovery does not depend on identity key isolation,
+        but still fundamentally depends on ML-KEM-768 IND-CCA2 security, post-$t_{\mathrm{rec}}$ RNG integrity, and deletion
+        schedule enforcement; it is not ``unconditional''.)
         The ratchet's PCS addresses a distinct threat from what the identity key alone provides:
         static identity keys supply authentication, whereas the ratchet continuously refreshes quantum-resistant
         symmetric confidentiality, using the hardware-isolated signing key strictly to prevent active
@@ -2106,14 +2154,12 @@ Apple's iMessage PQ3 \cite{imessage_pq3} introduced periodic in-band ML-KEM re-k
 centralized messaging service.
 
 In contrast to the centralized transport assumed by SPQR and PQ3, Star-Mesh targets a decentralized
-DHT and Sphinx mixnet setting.  Crucially, authentication in Star-Mesh is only partly post-quantum:
-the initial handshake message $M_0$ is not digitally signed, and its initiator authentication rests
-on classical $DH_1$; against a contemporaneous active CRQC during the initial handshake, $M_0$
-authentication remains classical.  Star-Mesh's post-quantum authentication specifically covers
-Bob's pre-key bundle (via an ML-DSA identity signature against DHT key substitution) and the
-post-compromise ratchet recovery updates (via mutual ML-DSA \emph{UpdateAuth} signatures,
-$\sigma_{\mathrm{init}}$ and $\sigma_{\mathrm{resp}}$), which are necessary to prevent an adversary
-holding compromised symmetric ratchet state from injecting adversarial ciphertexts during recovery.
+DHT and Sphinx mixnet setting.  In Star-Mesh, post-quantum authentication is enforced across all critical phases:
+Bob's pre-key bundle is authenticated via his long-term ML-DSA-65 identity key (preventing DHT pre-key substitution),
+the initial handshake message $M_0$ carries Alice's ML-DSA-65 signature $\sigma_0$ over her classical and KEM keys
+(providing explicit post-quantum initiator authentication and preventing active CRQC impersonation or key-substitution attacks during session establishment),
+and post-compromise ratchet updates mandate mutual ML-DSA-65 signatures ($\sigma_{\mathrm{init}}$ and $\sigma_{\mathrm{resp}}$),
+which prevent an adversary holding compromised symmetric ratchet state from injecting adversarial ciphertexts during recovery.
 
 \paragraph{Session Protocol and Briar.}
 Session \cite{session_protocol} routes messages through an onion network to achieve metadata
@@ -2273,12 +2319,13 @@ Each communicating peer maintains a persistent state record containing the follo
   \item \textbf{Session context:} Session ID $\mathsf{sid} \in \bits^{32}$ and protocol role $\mathsf{role} \in \{\mathrm{init}, \mathrm{resp}\}$.
   \item \textbf{Identity keys:} ML-DSA-65 keypair $(IK^{DSA}_{sk}, IK^{DSA}_{pk})$ (hardware-isolated) and classical keypair $(IK^{DH}_{sk}, IK^{DH}_{pk})$.
   \item \textbf{Symmetric roots:} Current root key $RK \in \bits^{32}$, live entropy pool $EP \in \bits^{32}$.
-  \item \textbf{Directional chain keys:} Active sending chain key $CK_s \in \bits^{32}$ and counter $N_s \in \mathbb{N}$; active receiving chain key $CK_r \in \bits^{32}$ and counter $N_r \in \mathbb{N}$; previous chain length $PN_s \in \mathbb{N}$.
+  \item \textbf{Directional chain keys:} Active sending chain key $CK_s \in \bits^{32}$ and counter $N_s \in \mathbb{N}$; active receiving chain key $CK_r \in \bits^{32}$ and counter $N_r \in \mathbb{N}$; previous receiving chain key $CK_r^{\mathrm{prev}}$ for in-flight message transition; previous chain length $PN_s \in \mathbb{N}$.
   \item \textbf{Classical DH ratchet state:} Local ephemeral keypair $(DH^{loc}_{sk}, DH^{loc}_{pk})$ and remote public key $DH^{rem}_{pk}$.
   \item \textbf{Asynchronous KEM buffer state:}
     \begin{itemize}
       \item $\mathsf{pq\_send\_seq}, \mathsf{pq\_recv\_seq} \in \mathbb{N}$ (monotonic update counters).
       \item $PQ^{\mathrm{outstanding}}$: Map $\mathsf{kem\_id} \mapsto (PQ^{loc}_{sk}, \mathsf{epoch}, \mathsf{timestamp})$ tracking local KEM proposals awaiting peer response.
+      \item $\mathsf{PQ}_{\mathrm{staged}}$: Optional staged pending update $(kem\_id, SS_{PQ}, ct, RK_{\mathrm{staged}}, \vec{CK}_{\mathrm{staged}}, EP_{\mathrm{staged}})$ awaiting commit confirmation.
       \item $PQ^{\mathrm{incoming}}$: Map $\mathsf{kem\_id} \mapsto (SS_{PQ}, ct, \mathsf{seq})$ buffering completed responses for in-order application.
       \item $PQ^{\mathrm{retired}}$: Bounded FIFO set of retired $\mathsf{kem\_id}$ values (capacity 256) preventing replay.
       \item $\mathsf{pq\_step\_counter} \in \{0, \dots, \Delta\}$ (ratchet interval countdown).
@@ -2314,22 +2361,40 @@ The mutual authentication signatures $\sigma_{\mathrm{init}}$ and $\sigma_{\math
 \end{align*}
 where $\mathsf{prev}$ and $\mathsf{prev}'$ are the running transcript hashes of the respective last accepted updates.
 
-\subsection{Asynchronous KEM Buffer State Transitions}
-Because ML-KEM shared secrets are not commutative, updates must be applied in a deterministic, synchronized order:
+\subsection{Asynchronous KEM Buffer State Transitions and Canonical Tie-Breaking}
+Because ML-KEM shared secrets are not commutative and sequential HKDF evaluations are order-dependent, updates must be applied in a deterministic, synchronized order:
 \begin{enumerate}
   \item \textbf{Proposal Generation:} When $\mathsf{pq\_step\_counter} = 0$, the initiator generates $(PQ^{loc}_{sk}, PQ^{loc}_{pk}) \getsr \MLKEM.\KeyGen(1^\lambda)$, derives
     \[
       \mathsf{kem\_id} \gets \mathsf{BLAKE3}\bigl(\strlit{StarMesh-KEM-v1} \,\|\, \mathsf{sid} \,\|\, PQ^{loc}_{pk} \,\|\, \mathsf{pq\_send\_seq}\bigr),
     \]
     records it in $PQ^{\mathrm{outstanding}}$, and transmits with signature $\sigma_{\mathrm{init}}$.
-  \item \textbf{Responder Advance:} The responder verifies $\sigma_{\mathrm{init}}$ and ensures $\mathsf{kem\_id} \notin PQ^{\mathrm{retired}}$. It computes $(ct, SS_{PQ}) \getsr \MLKEM.\Encaps(PQ^{loc}_{pk})$, generates $\sigma_{\mathrm{resp}}$, and executes the 96-byte derivation:
+  \item \textbf{Responder Staged Encapsulation and In-Flight Key Preservation:} The responder verifies $\sigma_{\mathrm{init}}$ and ensures $\mathsf{kem\_id} \notin PQ^{\mathrm{retired}}$. It computes $(ct, SS_{PQ}) \getsr \MLKEM.\Encaps(PQ^{loc}_{pk})$, generates $\sigma_{\mathrm{resp}}$, and evaluates the candidate staged derivation:
     \begin{align*}
-      EP' &\gets \HKDF(SS_{PQ},\; EP,\; \strlit{StarMesh-EntropyPool} \,\|\, ct,\; 32), \\
-      (RK',\, \vec{CK}) &\gets \HKDF(SS_{PQ},\; EP',\; \strlit{StarMesh-PQ-RK},\; 96),
+      EP_{\mathrm{staged}} &\gets \HKDF(SS_{PQ},\; EP,\; \strlit{StarMesh-EntropyPool} \,\|\, ct,\; 32), \\
+      (RK_{\mathrm{staged}},\, \vec{CK}_{\mathrm{staged}}) &\gets \HKDF(SS_{PQ},\; EP_{\mathrm{staged}},\; \strlit{StarMesh-PQ-RK},\; 96),
     \end{align*}
-    where $\vec{CK} = (CK_{A\to B}, CK_{B\to A})$.  It sets $RK \leftarrow RK'$, $CK_r \leftarrow CK_{A\to B}$, $CK_s \leftarrow CK_{B\to A}$, $EP \leftarrow EP'$, zeroizes $SS_{PQ}$, resets $\mathsf{pq\_step\_counter} \leftarrow \Delta$, and returns $(kem\_id, ct, \sigma_{\mathrm{resp}})$.
-  \item \textbf{Initiator In-Order Draining:} The initiator verifies $\sigma_{\mathrm{resp}}$, decapsulates $SS_{PQ} \gets \MLKEM.\Decaps(PQ^{loc}_{sk}, ct)$, executes the identical derivation, sets $RK \leftarrow RK'$, $CK_s \leftarrow CK_{A\to B}$, $CK_r \leftarrow CK_{B\to A}$, $EP \leftarrow EP'$, zeroizes $PQ^{loc}_{sk}$ and $SS_{PQ}$, retires $\mathsf{kem\_id}$, and resets $\mathsf{pq\_step\_counter} \leftarrow \Delta$.
-  \item \textbf{Replay and Timeout Handling:} Any received $\mathsf{kem\_id} \in PQ^{\mathrm{retired}}$ is immediately discarded without updating state. If an outstanding proposal times out without reply, the record is retired without changing $RK$, and a fresh proposal with a new sequence number is initiated on retry.
+    where $\vec{CK}_{\mathrm{staged}} = (CK_{A\to B}^{\mathrm{staged}}, CK_{B\to A}^{\mathrm{staged}})$.
+    To prevent desynchronization if the reply is lost in transit, and to ensure initiator messages currently in flight under the existing chain remain decryptable, the responder does \emph{not} immediately overwrite active root or chain keys. Instead, it buffers this state in $\mathsf{PQ}_{\mathrm{staged}} \leftarrow (kem\_id, SS_{PQ}, ct, RK_{\mathrm{staged}}, \vec{CK}_{\mathrm{staged}}, EP_{\mathrm{staged}})$ and retains active $CK_r$.
+    The responder attaches $(kem\_id, ct, \sigma_{\mathrm{resp}})$ to its reply.
+  \item \textbf{Responder Commit upon Peer Advance:} Upon receiving the first message or ACK authenticated under the new chain $CK_{A\to B}^{\mathrm{staged}}$, the responder commits the staged state:
+    \[
+      RK \leftarrow RK_{\mathrm{staged}}, \quad CK_s \leftarrow CK_{B\to A}^{\mathrm{staged}}, \quad EP \leftarrow EP_{\mathrm{staged}},
+    \]
+    promotes $CK_r \leftarrow CK_{A\to B}^{\mathrm{staged}}$, retains the old receiving chain as $CK_r^{\mathrm{prev}}$ to handle any remaining out-of-order in-flight messages from the previous chain, clears $\mathsf{PQ}_{\mathrm{staged}}$, zeroizes intermediate secrets, and resets $\mathsf{pq\_step\_counter} \leftarrow \Delta$.
+  \item \textbf{Initiator In-Order Draining:} The initiator verifies $\sigma_{\mathrm{resp}}$, decapsulates $SS_{PQ} \gets \MLKEM.\Decaps(PQ^{loc}_{sk}, ct)$, executes the identical derivation, sets $RK \leftarrow RK'$, $CK_s \leftarrow CK_{A\to B}$, $CK_r \leftarrow CK_{B\to A}$, $EP \leftarrow EP'$, zeroizes $PQ^{loc}_{sk}$ and $SS_{PQ}$, retires $\mathsf{kem\_id}$, and resets $\mathsf{pq\_step\_counter} \leftarrow \Delta$. The prior chains are retained as drained references until in-flight skips are committed.
+  \item \textbf{Concurrent Initiation and Canonical Lexicographical Tie-Break:} If both endpoints concurrently initiate proposals $U_A = (\mathsf{kem\_id}_A, PQ_{pk,A})$ and $U_B = (\mathsf{kem\_id}_B, PQ_{pk,B})$:
+    \begin{itemize}
+      \item Both endpoints buffer the proposals and deterministically sort them by their authenticated 32-byte identifiers:
+        \[
+          U_{(1)} \coloneqq \arg\min_{U \in \{U_A, U_B\}} \mathsf{kem\_id}(U), \quad
+          U_{(2)} \coloneqq \arg\max_{U \in \{U_A, U_B\}} \mathsf{kem\_id}(U),
+        \]
+        breaking ties by comparing identity keys $IK^{DSA}_{pk}$.
+      \item Both endpoints evaluate the updates in this identical canonical order: $U_{(1)}$ is applied to $(RK, EP)$ to produce intermediate $(RK_1, EP_1)$, and $U_{(2)}$ is applied chaining directly from $(RK_1, EP_1)$ to produce $(RK_2, EP_2)$ and active directional chain keys $\vec{CK}_2$.
+      \item Because the tie-break sort is canonical and deterministic, both endpoints arrive at the identical final root key and entropy pool regardless of network packet arrival order.
+    \end{itemize}
+  \item \textbf{Replay, Timeout, and Loss Recovery:} Any received $\mathsf{kem\_id} \in PQ^{\mathrm{retired}}$ is immediately discarded without updating state. If an outstanding proposal times out without reply, the initiator retires the identifier without changing $RK$ and initiates a fresh proposal on retry. If the responder has a pending staged entry in $\mathsf{PQ}_{\mathrm{staged}}$ and receives a retransmission or fresh proposal with a newer sequence number (indicating the previous reply was lost), the responder discards the uncommitted $\mathsf{PQ}_{\mathrm{staged}}$ entry without modifying active $RK$, preventing permanent desynchronization.
 \end{enumerate}
 
 \subsection{Max-Skip Bound and Staged Commit-After-Authentication}

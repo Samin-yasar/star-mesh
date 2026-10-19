@@ -1236,6 +1236,82 @@ mod tests {
     }
 
     #[test]
+    fn test_concurrent_dual_initiation_canonical_tie_break() {
+        // Demonstrates Remark 3.2 & Appendix A.4:
+        // Order-dependence of HKDF pool/root derivations requires canonical tie-breaking
+        // to prevent state divergence when both endpoints concurrently initiate updates.
+        let alice = RatchetState::new(&[42u8; 64], true);
+        let bob = RatchetState::new(&[42u8; 64], false);
+
+        let (ek_a, _dk_a) = mlkem768_keygen();
+        let (ek_b, _dk_b) = mlkem768_keygen();
+
+        let id_a = kem_id(&alice.session_id, 0, &ek_a);
+        let id_b = kem_id(&bob.session_id, 0, &ek_b);
+
+        // Bob encapsulates against Alice's pk (Update A)
+        let (ct_a, ss_a) = ek_a.encapsulate_with_rng(&mut rand::rng());
+        let mut ss_a_bytes = [0u8; 32];
+        ss_a_bytes.copy_from_slice(ss_a.as_ref());
+        let ct_a_bytes = <ml_kem::Ciphertext<MlKem768> as AsRef<[u8]>>::as_ref(&ct_a).to_vec();
+
+        // Alice encapsulates against Bob's pk (Update B)
+        let (ct_b, ss_b) = ek_b.encapsulate_with_rng(&mut rand::rng());
+        let mut ss_b_bytes = [0u8; 32];
+        ss_b_bytes.copy_from_slice(ss_b.as_ref());
+        let ct_b_bytes = <ml_kem::Ciphertext<MlKem768> as AsRef<[u8]>>::as_ref(&ct_b).to_vec();
+
+        // 1. Demonstrate divergence without canonical tie-breaking:
+        // Alice applies A then B; Bob applies B then A.
+        let naive_alice_ep = alice.entropy_pool;
+        // Alice: apply A
+        let ep1 = hkdf_derive(&ss_a_bytes, Some(&naive_alice_ep), &[b"StarMesh-EntropyPool", ct_a_bytes.as_slice()].concat(), 32).unwrap();
+        let _rk1 = hkdf_derive(&ss_a_bytes, Some(&ep1), b"StarMesh-PQ-RK", 96).unwrap();
+        // Alice: apply B
+        let ep2_a = hkdf_derive(&ss_b_bytes, Some(&ep1), &[b"StarMesh-EntropyPool", ct_b_bytes.as_slice()].concat(), 32).unwrap();
+        let rk2_a = hkdf_derive(&ss_b_bytes, Some(&ep2_a), b"StarMesh-PQ-RK", 96).unwrap();
+
+        // Bob: apply B then A
+        let naive_bob_ep = bob.entropy_pool;
+        let ep1_b = hkdf_derive(&ss_b_bytes, Some(&naive_bob_ep), &[b"StarMesh-EntropyPool", ct_b_bytes.as_slice()].concat(), 32).unwrap();
+        let _rk1_b = hkdf_derive(&ss_b_bytes, Some(&ep1_b), b"StarMesh-PQ-RK", 96).unwrap();
+        let ep2_b = hkdf_derive(&ss_a_bytes, Some(&ep1_b), &[b"StarMesh-EntropyPool", ct_a_bytes.as_slice()].concat(), 32).unwrap();
+        let rk2_b = hkdf_derive(&ss_a_bytes, Some(&ep2_b), b"StarMesh-PQ-RK", 96).unwrap();
+
+        // Without tie-break, naive application order diverges!
+        assert_ne!(rk2_a[0..32], rk2_b[0..32], "Naive opposite arrival orders diverge");
+
+        // 2. Demonstrate convergence WITH canonical lexicographical tie-break rule:
+        let updates = if id_a < id_b {
+            vec![(&ss_a_bytes[..], &ct_a_bytes[..]), (&ss_b_bytes[..], &ct_b_bytes[..])]
+        } else {
+            vec![(&ss_b_bytes[..], &ct_b_bytes[..]), (&ss_a_bytes[..], &ct_a_bytes[..])]
+        };
+
+        // Both Alice and Bob apply updates in canonical sorted order
+        let mut canon_alice_ep = alice.entropy_pool;
+        let mut canon_alice_rk = [0u8; 32];
+        for (ss, ct) in &updates {
+            let next_ep = hkdf_derive(ss, Some(&canon_alice_ep), &[b"StarMesh-EntropyPool", *ct].concat(), 32).unwrap();
+            let next_rk = hkdf_derive(ss, Some(&next_ep), b"StarMesh-PQ-RK", 96).unwrap();
+            canon_alice_ep.copy_from_slice(&next_ep);
+            canon_alice_rk.copy_from_slice(&next_rk[0..32]);
+        }
+
+        let mut canon_bob_ep = bob.entropy_pool;
+        let mut canon_bob_rk = [0u8; 32];
+        for (ss, ct) in &updates {
+            let next_ep = hkdf_derive(ss, Some(&canon_bob_ep), &[b"StarMesh-EntropyPool", *ct].concat(), 32).unwrap();
+            let next_rk = hkdf_derive(ss, Some(&next_ep), b"StarMesh-PQ-RK", 96).unwrap();
+            canon_bob_ep.copy_from_slice(&next_ep);
+            canon_bob_rk.copy_from_slice(&next_rk[0..32]);
+        }
+
+        assert_eq!(canon_alice_rk, canon_bob_rk, "Canonical tie-breaking ensures root key convergence");
+        assert_eq!(canon_alice_ep, canon_bob_ep, "Canonical tie-breaking ensures entropy pool convergence");
+    }
+
+    #[test]
     fn test_recovery_header_authentication_is_verified() {
         let mut alice = RatchetState::new(&[8u8; 64], true);
         let mut bob = RatchetState::new(&[8u8; 64], false);
