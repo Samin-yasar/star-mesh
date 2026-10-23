@@ -1,6 +1,10 @@
 # Empirical Mixnet Simulation
 
-`poc/python/mixnet_sim.py` is a small, deterministic queue simulation for the Star-Mesh
+> **Synced with spec.md / paper rev:** v0.1 (October 2026)
+>
+> **Source of truth**: Wire overheads, signature sizes (ML-DSA-65: 3,309 B, public key: 1,952 B),
+> and KEM sizes (ML-KEM-768: 1,184 B pk, 1,088 B ct) are defined in [`spec.md`](../spec.md).
+> Evaluation tables and Sphinx fragmentation analyses are derived from `paper/paper.tex` (§3.6, §6).
 Sphinx/Loopix integration. It uses only the Python standard library and is intended to expose
 packetization and queueing assumptions before a full network implementation exists.
 

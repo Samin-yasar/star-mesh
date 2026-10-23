@@ -1,6 +1,10 @@
 # Research notes
 
-This note collects the main design observations that guide the current implementation and future work. It is intentionally brief and explicit about assumptions, trade-offs, and unresolved questions.
+> **Synced with spec.md / paper rev:** v0.1 (October 2026)
+>
+> **Source of truth**: Protocol parameters and state-machine transitions follow [`spec.md`](../spec.md)
+> and the formal analysis in `paper/paper.tex`.
+
 
 ## 1. Research objective
 

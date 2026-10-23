@@ -1,8 +1,8 @@
 .PHONY: help all paper paper-md python-poc rust-poc mixnet-sim verify clean
 
-PYTHON ?= python3
 VENV_DIR := .venv
 VENV_PYTHON := $(VENV_DIR)/bin/python3
+PYTHON ?= $(VENV_PYTHON)
 
 help:
 	@echo "Star-Mesh research repository"
@@ -30,6 +30,7 @@ $(VENV_PYTHON):
 	$(PYTHON) -m venv $(VENV_DIR)
 
 python-poc: $(VENV_PYTHON)
+	$(VENV_PYTHON) -m pip install --quiet kyber-py dilithium-py blake3 cryptography
 	$(VENV_PYTHON) poc/python/poc.py
 
 rust-poc:

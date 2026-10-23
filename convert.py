@@ -100,6 +100,9 @@ def convert_latex_to_md(tex_path, aux_path, md_path):
         r'\MLKEM': r'\mathsf{ML\text{-}KEM}',
         r'\MLDSA': r'\mathsf{ML\text{-}DSA}',
         r'\HKDF': r'\mathsf{HKDF}',
+        r'\HKDFExtract': r'\mathsf{HKDFExtract}',
+        r'\HKDFExpand': r'\mathsf{HKDFExpand}',
+        r'\HMAC': r'\mathsf{HMAC}',
         r'\DHop': r'\mathsf{DH}',
         r'\Encaps': r'\mathsf{Encaps}',
         r'\Decaps': r'\mathsf{Decaps}',
@@ -108,11 +111,63 @@ def convert_latex_to_md(tex_path, aux_path, md_path):
         r'\KeyGen': r'\mathsf{KeyGen}',
     }
 
+    def extract_braced_arg(text, pos):
+        start = text.find('{', pos)
+        if start == -1:
+            return None, pos
+        depth = 1
+        i = start + 1
+        while i < len(text):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start+1:i], i + 1
+            i += 1
+        return None, len(text)
+
+    def expand_balanced_macro(macro_name, formatter, text):
+        needle = '\\' + macro_name
+        while needle in text:
+            idx = text.find(needle)
+            if idx == -1:
+                break
+            after_cmd = idx + len(needle)
+            if after_cmd < len(text) and text[after_cmd].isalpha():
+                break
+            arg, next_pos = extract_braced_arg(text, after_cmd)
+            if arg is None:
+                break
+            text = text[:idx] + formatter(arg) + text[next_pos:]
+        return text
+
     def expand_macros(text):
         for macro, replacement in macros.items():
             pattern = re.escape(macro) + r'(?![a-zA-Z])'
             text = re.sub(pattern, lambda m, r=replacement: r, text)
-        text = re.sub(r'\\flen\{((?:[^{}]|\{[^{}]*\})*)\}', lambda m: f'\\mathsf{{len}}_{{32}}({m.group(1)})', text)
+
+        # Handle \bigcat
+        while r'\bigcat' in text:
+            idx = text.find(r'\bigcat')
+            if idx == -1:
+                break
+            after = idx + len(r'\bigcat')
+            arg1, next_pos = extract_braced_arg(text, after)
+            if arg1 is None:
+                break
+            rest = text[next_pos:]
+            match_ws = re.match(r'^\s*\{', rest)
+            if match_ws:
+                arg2, final_pos = extract_braced_arg(text, next_pos)
+                text = text[:idx] + f'\\mathop{{\\Vert}}_{{{arg1}}} {arg2}' + text[final_pos:]
+            else:
+                text = text[:idx] + f'\\mathop{{\\Vert}}_{{{arg1}}}' + text[next_pos:]
+
+        text = expand_balanced_macro('flen', lambda a: f'\\mathsf{{len}}_{{32}}({a})', text)
+        text = expand_balanced_macro('hexlit', lambda a: f'\\mathtt{{{a}}}', text)
+        text = expand_balanced_macro('strlit', lambda a: f'\\text{{"{a}"}}', text)
+        text = expand_balanced_macro('footnote', lambda a: f' (* {a.strip()} *)', text)
         text = re.sub(r'\\Hgame\{((?:[^{}]|\{[^{}]*\})*)\}', lambda m: f'\\mathbf{{H}}_{{{m.group(1)}}}', text)
         return text
 
@@ -183,9 +238,7 @@ def convert_latex_to_md(tex_path, aux_path, md_path):
         output.append(f"**Date:** {date}  \n")
 
     in_abstract = False
-    in_itemize = []
-    in_enumerate = []
-    enum_counters = []
+    list_stack = []
 
     sec_count = 0
     subsec_count = 0
@@ -253,7 +306,7 @@ def convert_latex_to_md(tex_path, aux_path, md_path):
             continue
 
         # Paragraphs
-        paragraph_match = re.match(r'\\paragraph\{([^}]+)\}', line)
+        paragraph_match = re.match(r'^\s*\\paragraph\{([^}]+)\}', line)
         if paragraph_match:
             para_name = paragraph_match.group(1)
             para_name = re.sub(r'\\label\{[^}]+\}', '', para_name).strip()
@@ -317,34 +370,32 @@ def convert_latex_to_md(tex_path, aux_path, md_path):
 
         # Lists
         if r'\begin{itemize}' in line:
-            in_itemize.append(True)
+            list_stack.append({'type': 'itemize'})
             i += 1
             continue
         elif r'\end{itemize}' in line:
-            if in_itemize:
-                in_itemize.pop()
+            if list_stack:
+                list_stack.pop()
             i += 1
             continue
 
         if r'\begin{enumerate}' in line:
-            in_enumerate.append(True)
-            enum_counters.append(1)
+            list_stack.append({'type': 'enumerate', 'counter': 1})
             i += 1
             continue
         elif r'\end{enumerate}' in line:
-            if in_enumerate:
-                in_enumerate.pop()
-                enum_counters.pop()
+            if list_stack:
+                list_stack.pop()
             i += 1
             continue
 
         if r'\item' in line:
             cleaned_item = re.sub(r'\\label\{[^}]+\}', '', line.replace(r'\item', '').strip())
-            indent = "  " * (len(in_itemize) + len(in_enumerate) - 1)
-            if in_enumerate:
-                cnt = enum_counters[-1]
+            indent = "  " * (len(list_stack) - 1) if list_stack else ""
+            if list_stack and list_stack[-1]['type'] == 'enumerate':
+                cnt = list_stack[-1]['counter']
                 output.append(f"{indent}{cnt}. {cleaned_item}")
-                enum_counters[-1] += 1
+                list_stack[-1]['counter'] += 1
             else:
                 output.append(f"{indent}- {cleaned_item}")
             i += 1
@@ -419,13 +470,16 @@ def convert_latex_to_md(tex_path, aux_path, md_path):
                 md_table = """
 | Component | Classical (Signal) | Star-Mesh | Overhead |
 | :--- | :--- | :--- | :--- |
-| Handshake, with OTPK (bytes) | $\\approx 150$ [4](#marlinspike_x3dh) | $\\approx 4,224$ | $+4,074$ |
-| Handshake, SPK-only fallback | $\\approx 118$ [4](#marlinspike_x3dh) | $\\approx 3,136$ | $+3,018$ |
+| *Star-Mesh handshake rows include the 32-byte $tag_A$ confirmation tag.* |||
+| Handshake, with OTPK (bytes) | $\\approx 150$ [8](#marlinspike_x3dh) | $\\approx 7,565$ | $+7,415$ |
+| Handshake, SPK-only fallback | $\\approx 118$ [8](#marlinspike_x3dh) | $\\approx 6,477$ | $+6,359$ |
 | Ratchet header (non-PQ step) | 32 (X25519 pk) | 32 (X25519 pk) | 0 |
-| Ratchet header (PQ step) | N/A | $+1,184$ (KEM pk) | $+1,184$ |
-| Ratchet reply (PQ step) | N/A | $+1,088$ (KEM ct) | $+1,088$ |
+| Ratchet step, unsigned (raw KEM pk) | N/A | $+1,184$ (KEM pk) | $+1,184$ |
+| Ratchet reply, unsigned (raw KEM ct) | N/A | $+1,088$ (KEM ct) | $+1,088$ |
+| Ratchet step, signed ($pk+\\sigma_{\\mathsf{ML\\text{-}DSA}}$) | N/A | $+4,493$ | $+4,493$ |
+| Ratchet reply, signed ($ct+\\sigma_{\\mathsf{ML\\text{-}DSA}}$) | N/A | $+4,397$ | $+4,397$ |
 
-*Table 3: Bandwidth overhead comparison. Classical Signal handshake size is derived from the X3DH specification [4](#marlinspike_x3dh): two 32-byte X25519 public keys (IK and EK), one 32-byte SPK, one 32-byte OTPK, and protocol framing, totalling approximately 150 bytes (118 bytes without an OTPK). Star-Mesh handshake figures follow the $M_0$ definition of Section 3.4: $IK^{DSA}_{pk,A}$ (1,952 B) $+$ $IK^{DH}_{pk,A}$ (32 B) $+$ $EK_{pk,A}$ (32 B) $+$ $ct_1$ (1,088 B) $+$ optionally $ct_2$ (1,088 B) $+$ $\\approx$32 B framing/identifiers. The 1,952-byte $IK^{DSA}_{pk,A}$ is transmitted on every handshake as specified; implementations that cache a correspondent's identity key after first contact can amortise this cost across a relationship rather than a session.*
+*Table 3: Bandwidth overhead comparison. Classical Signal handshake size is derived from the X3DH specification [8](#marlinspike_x3dh): two 32-byte X25519 public keys (IK and EK), one 32-byte SPK, one 32-byte OTPK, and protocol framing, totalling approximately 150 bytes with an initial encrypted message (118 bytes without an OTPK). Bob does not receive his own SPK or OTPK back from Alice. Star-Mesh handshake figures follow the $M_0$ definition of Section 3.4: $IK^{DSA}_{pk,A}$ (1,952 B) $+$ $IK^{DH}_{pk,A}$ (32 B) $+$ $EK_{pk,A}$ (32 B) $+$ $ct_1$ (1,088 B) $+$ optionally $ct_2$ (1,088 B) $+$ 32 B confirmation tag $+$ $\\sigma_0$ signature (3,309 B) $+$ 32 B framing/identifiers $= 7,565$ B with OTPK (7,533 B raw cryptographic payload), 6,477 B without (6,445 B raw cryptographic payload). With a 1,404-byte Sphinx payload capacity, transmitting $M_0$ requires a 6-packet Sphinx train ($\\lceil 7,565 / 1,404 \\rceil = 6$, and 5 packets for SPK-only: $\\lceil 6,477 / 1,404 \\rceil = 5$). The 1,952-byte $IK^{DSA}_{pk,A}$ is transmitted on every handshake as specified; implementations that cache a correspondent's identity key after first contact can amortise this cost across a relationship rather than a session.*
 """
                 output.append(md_table)
             i += 1

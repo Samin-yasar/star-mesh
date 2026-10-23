@@ -1,0 +1,73 @@
+\contentsline {section}{\numberline {1}Introduction}{3}{section.1}%
+\contentsline {paragraph}{Our Approach.}{3}{section*.2}%
+\contentsline {paragraph}{Security boundary.}{3}{section*.3}%
+\contentsline {paragraph}{Hybrid Security Rationale.}{4}{section*.4}%
+\contentsline {paragraph}{Trust Assumptions on Infrastructure.}{4}{section*.5}%
+\contentsline {paragraph}{Contributions.}{4}{section*.6}%
+\contentsline {paragraph}{Scope and Proof Status.}{4}{section*.7}%
+\contentsline {paragraph}{UC formulation status.}{5}{section*.8}%
+\contentsline {paragraph}{Research Positioning.}{5}{section*.9}%
+\contentsline {paragraph}{Paper Organization.}{5}{section*.10}%
+\contentsline {section}{\numberline {2}Preliminaries}{5}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Notation}{5}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Key Encapsulation Mechanisms}{7}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Digital Signature Schemes}{7}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}Cryptographic Primitives in Star-Mesh}{8}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}Parameter Selection and Security Categories}{8}{subsection.2.5}%
+\contentsline {section}{\numberline {3}The Star-Mesh Protocol}{9}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Overview and Trust Model}{9}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Key Generation and Identity}{9}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Pre-Key Bundle Publication}{10}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Hybrid PQ-X3DH Handshake}{11}{subsection.3.4}%
+\contentsline {paragraph}{Step 1 --- Classical X3DH Component.}{11}{section*.11}%
+\contentsline {paragraph}{Step 2 --- Post-Quantum KEM Component.}{11}{section*.12}%
+\contentsline {paragraph}{Step 3 --- Cryptographic Binding and Key Derivation.}{11}{section*.13}%
+\contentsline {paragraph}{Handshake Message.}{12}{section*.14}%
+\contentsline {subsection}{\numberline {3.5}Ephemeral PQ Double Ratchet}{13}{subsection.3.5}%
+\contentsline {subsubsection}{\numberline {3.5.1}Ratchet State}{13}{subsubsection.3.5.1}%
+\contentsline {subsubsection}{\numberline {3.5.2}Symmetric Ratchet, Message Framing, and AEAD Header Authentication}{13}{subsubsection.3.5.2}%
+\contentsline {subsubsection}{\numberline {3.5.3}DH Ratchet Step}{14}{subsubsection.3.5.3}%
+\contentsline {subsubsection}{\numberline {3.5.4}PQ Ratchet Step}{14}{subsubsection.3.5.4}%
+\contentsline {subsubsection}{\numberline {3.5.5}Out-of-Order Message Handling: Max-Skip Bound and Staged Commit}{18}{subsubsection.3.5.5}%
+\contentsline {subsubsection}{\numberline {3.5.6}Deletion Schedule}{19}{subsubsection.3.5.6}%
+\contentsline {subsection}{\numberline {3.6}Prototype Implementations}{19}{subsection.3.6}%
+\contentsline {paragraph}{Formal Symbolic Models.}{20}{section*.15}%
+\contentsline {section}{\numberline {4}Security Model}{21}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Cryptographic Assumptions}{21}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Execution Environment and Adversary}{25}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Post-Quantum Forward Secrecy (PQ-FS) Game}{27}{subsection.4.3}%
+\contentsline {subsection}{\numberline {4.4}Post-Compromise Security (PCS) Game}{27}{subsection.4.4}%
+\contentsline {subsection}{\numberline {4.5}A Single-Update Recovery Theorem}{28}{subsection.4.5}%
+\contentsline {paragraph}{Oracle semantics.}{28}{section*.16}%
+\contentsline {paragraph}{Freshness and admissible target.}{29}{section*.17}%
+\contentsline {section}{\numberline {5}Security Analysis}{31}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Authentication: Bundle Identity Binding}{31}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Post-Quantum Forward Secrecy}{32}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Post-Compromise Security}{34}{subsection.5.3}%
+\contentsline {section}{\numberline {6}Metadata Resistance}{35}{section.6}%
+\contentsline {paragraph}{DHT Mailbox Indirection.}{35}{section*.18}%
+\contentsline {paragraph}{Onion-Routing Overlay.}{35}{section*.19}%
+\contentsline {paragraph}{Empirical Queue Simulation Results.}{36}{section*.20}%
+\contentsline {paragraph}{Mitigating Burst Fingerprints.}{37}{section*.21}%
+\contentsline {section}{\numberline {7}Bandwidth and Performance Analysis}{38}{section.7}%
+\contentsline {paragraph}{Amortised Cryptographic Cost.}{38}{section*.22}%
+\contentsline {paragraph}{Decoupled Overlay and DHT Transport Overhead.}{39}{section*.23}%
+\contentsline {paragraph}{Computational Cost.}{40}{section*.24}%
+\contentsline {section}{\numberline {8}Assumptions and Limitations}{41}{section.8}%
+\contentsline {section}{\numberline {9}Related Work}{43}{section.9}%
+\contentsline {paragraph}{Signal (PQXDH, SPQR) and Apple PQ3.}{43}{section*.25}%
+\contentsline {paragraph}{Session Protocol and Briar.}{44}{section*.26}%
+\contentsline {paragraph}{Double Ratchet Formal Analysis.}{44}{section*.27}%
+\contentsline {paragraph}{PQ-MLS and Group Messaging.}{44}{section*.28}%
+\contentsline {paragraph}{Hybrid KEM Composition.}{45}{section*.29}%
+\contentsline {paragraph}{Metadata Resistance.}{45}{section*.30}%
+\contentsline {section}{\numberline {10}Conclusion}{45}{section.10}%
+\contentsline {paragraph}{Research Positioning.}{46}{section*.31}%
+\contentsline {paragraph}{Future Work.}{46}{section*.32}%
+\contentsline {section}{\numberline {A}Complete Protocol State Machine and Message Framing}{46}{appendix.A}%
+\contentsline {subsection}{\numberline {A.1}Endpoint State Representation}{46}{subsection.A.1}%
+\contentsline {subsection}{\numberline {A.2}Canonical Message Framing and Associated Data}{47}{subsection.A.2}%
+\contentsline {subsection}{\numberline {A.3}Canonical Asymmetric Update Signatures}{48}{subsection.A.3}%
+\contentsline {subsection}{\numberline {A.4}Asynchronous KEM Buffer State Transitions and Canonical Tie-Breaking}{48}{subsection.A.4}%
+\contentsline {subsection}{\numberline {A.5}Max-Skip Bound and Staged Commit-After-Authentication}{49}{subsection.A.5}%
+\contentsline {section}{References}{50}{section*.35}%

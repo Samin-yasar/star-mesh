@@ -1,118 +1,206 @@
 # Star-Mesh Ratchet State Machine Specification
 
-This document defines the formal state machine for the Star-Mesh Post-Quantum Double Ratchet, ensuring adherence to the security properties of Post-Quantum Forward Secrecy (PQ-FS) and Post-Compromise Security (PCS).
+> **Synced with spec.md / paper rev:** v0.1 (October 2026)
+>
+> **Source of truth**: Byte-level formats, domain labels, wire structures, and KDF inputs
+> are canonically defined in [`spec.md`](../spec.md). State transitions and security proofs
+> are derived from `paper/paper.tex`. If there is any discrepancy, [`spec.md`](../spec.md)
+> and `paper.tex` win.
+
+---
+
+This document defines the formal state machine for the Star-Mesh Post-Quantum Double Ratchet,
+ensuring adherence to Post-Quantum Forward Secrecy (PQ-FS) and Post-Compromise Security (PCS).
 
 ## 1. Ratchet State Struct
-Each node maintains a `RatchetState` for every active session.
+
+Each node maintains a `RatchetState` for every active session. In the Rust reference
+implementation (`poc/rust/src/main.rs`), the state is defined as:
 
 ```rust
-struct RatchetState {
-    // Core Keys
-    root_key: [u8; 32],             // Advanced by DH and PQ ratchets
-    send_chain_key: [u8; 32],       // Symmetric ratchet for outgoing messages
-    recv_chain_key: [u8; 32],       // Symmetric ratchet for incoming messages
+pub struct RatchetState {
+    pub session_id: [u8; 32],
+    pub is_initiator: bool,
     
-    // Classical DH Keys
-    dh_sk_local: x25519::SecretKey, // Current local DH secret
-    dh_pk_remote: x25519::PublicKey,// Current remote DH public
+    // Identity and Authentication Keys (ML-DSA-65)
+    signing_key: SigningKey<MlDsa65>,
+    trusted_identity: Option<VerifyingKey<MlDsa65>>,
+    trusted_responder_identity: Option<VerifyingKey<MlDsa65>>,
     
-    // Post-Quantum Keys
-    pq_outstanding: map<KemId, OutstandingKem>, // One secret per in-flight update
-    pq_completed: map<KemId, CompletedKem>,     // Responses waiting for ordered application
-    pq_retired: set<KemId>,                     // Replay protection
+    // Core Ratchet Keys
+    pub root_key: [u8; 32],
+    pub entropy_pool: [u8; 32],
+    pub send_chain_key: Option<[u8; 32]>,
+    pub recv_chain_key: Option<[u8; 32]>,
     
-    // Counters and Metadata
-    n_s: u32,                       // Number of messages sent in current DH ratchet
-    n_r: u32,                       // Number of messages received in current DH ratchet
-    pn: u32,                        // Number of messages in previous DH ratchet
-    pq_counter: u32,                // Messages since last PQ ratchet step
+    // Transcript and Replay Protection
+    transcript_hash: [u8; 32],
+    valid_predecessors: HashSet<[u8; 32]>,
     
-    // Skipped Key Cache (Out-of-order handling)
-    // Map: (Remote_DH_PK, Sequence_Number) -> Message_Key
-    skipped_keys: HashMap<([u8; 32], u32), [u8; 32]>,
+    // Post-Quantum Ratchet Buffers
+    pub next_kem_sequence: u64,
+    pub next_kem_to_apply: u64,
+    outstanding_kems: HashMap<KemId, OutstandingKem>,
+    completed_kems: HashMap<KemId, CompletedKem>,
+    retired_kems: HashSet<KemId>,
+    
+    // Counters and Skipped Keys
+    pub pq_step_counter: u32,
+    pub skipped_keys: HashMap<([u8; 32], u32), [u8; 32]>,
 }
 ```
 
+---
+
 ## 2. Initialization from PQ-X3DH
-Upon successful completion of the PQ-X3DH handshake, the state is initialized using the 64-byte `OKM` (Output Keying Material).
+
+Upon successful completion of the PQ-X3DH handshake, the state is initialized using the 64-byte `OKM`:
 
 - **Root Key:** `state.root_key = OKM[0..32]`
-- **Chain Keys:** 
-  - If Initiator (Alice): `state.send_chain_key = OKM[32..64]`.
-  - If Responder (Bob): `state.recv_chain_key = OKM[32..64]`.
-  - The peer's initial receive chain is installed during authenticated session setup.
-- **PQ Keys:** Initialized from the `PQ_OTPK` used in the handshake.
+- **Entropy Pool:** `state.entropy_pool = state.root_key` (identical initial value)
+- **Transcript Hash:** `state.transcript_hash = BLAKE3("StarMesh-transcript-v1")`
+- **Predecessors:** `state.valid_predecessors = { state.transcript_hash }`
+- **Directional Chain Keys:**
+  - If Initiator (Alice): `state.send_chain_key = Some(OKM[32..64])`, `state.recv_chain_key = None`.
+  - If Responder (Bob): `state.recv_chain_key = Some(OKM[32..64])`, `state.send_chain_key = None`.
+- **Identity Keys:** Local ML-DSA-65 signing key loaded; peer verifying keys set from authenticated handshake bundle and $M_0$ signature $\sigma_{M_0}$.
+
+---
 
 ## 3. Symmetric-Key Chain Ratchet
-Each time a message is sent or received, the corresponding chain key is ratcheted using BLAKE3.
 
-1.  **Message Key Derivation:** $MK = \text{BLAKE3-KDF}(CK, \text{0x01}, \text{"StarMesh-MK"})$
-2.  **Next Chain Key:** $CK_{next} = \text{BLAKE3-KDF}(CK, \text{0x02}, \text{"StarMesh-CK"})$
-3.  **Erasure:** Immediately overwrite $CK$ with $CK_{next}$ and zeroize the old $CK$ from memory.
+Each time a message is sent or received, the corresponding chain key is ratcheted using BLAKE3:
 
-## 4. Post-Quantum (PQ) Ratchet Step
-The PQ Ratchet ensures security recovery against $Adv_{Quant}$.
+1. **Message Key Derivation:**
+   $$MK_i = \text{BLAKE3-KDF}(CK_i, \text{domain} = \text{0x01}, \text{info} = \text{"StarMesh-MK"})$$
+2. **Next Chain Key Derivation:**
+   $$CK_{i+1} = \text{BLAKE3-KDF}(CK_i, \text{domain} = \text{0x02}, \text{info} = \text{"StarMesh-CK"})$$
+3. **Erasure:** Immediately overwrite and zeroize $CK_i$ with $CK_{i+1}$. $MK_i$ is zeroized immediately after one-time encryption or decryption.
 
-- **Trigger:** Triggered when `pq_counter >= 50` OR session time exceeds 24 hours.
-- **Process:**
-  1.  **Initiation:** Alice generates a fresh ML-KEM pair, allocates `kem_id`, and signs
-      `session_id || kem_id || sequence || epoch || predecessor_transcript || pq_pk` with ML-DSA.
-      The secret is stored under `kem_id`.
-  2.  **Response:** Upon receiving `pq_pk_local`, Bob performs `Encaps(pq_pk_local)`, deriving `(ct, SS_PQ)`.
-  3.  **Key Update:** Both parties update the `root_key` and both directional chain keys:
-      $$ RK_{new},\; CK_{new} = \text{HKDF-SHA3-256}(SS_{PQ},\; salt = RK_{old},\; info = \text{"StarMesh-PQ-RK"},\; \ell = 96) $$
-      The 96 bytes are root, initiator-to-responder chain, and responder-to-initiator chain.
-  4.  **Replacement:** The KEM secret is consumed exactly once and the identifier is moved to
-      `pq_retired`. A second response for the identifier is rejected.
+---
 
-## 5. Message Key Derivation and Header
-The message header must provide enough info for the receiver to synchronize the state without leaking identity.
+## 4. Classical DH Ratchet Step
 
-### Header Structure:
-- `dh_pk`: Alice's current ephemeral X25519 public key.
-- `n`: Message index in the current DH ratchet.
-- `pn`: Number of messages in the previous DH ratchet.
-- `pq_pk`: (Optional) New ephemeral ML-KEM public key (if Alice is initiating a PQ step).
-- `pq_ct`: (Optional) ML-KEM ciphertext (if Alice is responding to Bob's PQ step).
-- `kem_id`: Authenticated identifier for a PQ ratchet exchange; responses are matched by this
-  identifier rather than arrival order.
+When an incoming message carries a new ephemeral X25519 public key:
 
-### Final Encryption:
-- **Ciphertext:** $C = \text{AES-256-GCM}(MK, \text{Plaintext}, \text{Header})$
-- **Auth Tag:** Included in GCM.
+1. Compute classical shared secret: $DH_{new} = \text{X25519}(local\_eph\_sk, remote\_eph\_pk)$.
+2. Derive new root and send chain key:
+   $$out = \text{HKDF-SHA3-256}(ikm = DH_{new}, salt = RK, info = \text{"StarMesh-RK"}, L = 64)$$
+   $$RK_{new} = out[0..32], \quad CK_s = out[32..64]$$
+3. Zeroize old $RK$ and ephemeral private keys.
+4. Classical healing relies on Assumption 4.3 (DDH / PRF-ODH on X25519). Standard PRF security of HMAC-SHA3-256 applies because the salt is the secret $RK$.
 
-## 6. Out-of-Order Message Handling
-If a message arrives with a sequence number $N > state.n\_r$:
+---
 
-1.  **Key Calculation:** The receiver ratchets the `recv_chain_key` forward to $N$.
-2.  **Caching:** All intermediate $MK$s derived during this process are stored in `state.skipped_keys` indexed by `(dh_pk_remote, seq_num)`.
-3.  **Limits:** `skipped_keys` is capped at 1000 entries. If full, the oldest keys are shredded.
-4.  **Retrieval:** If a delayed message arrives, the receiver checks `skipped_keys`, decrypts, and immediately deletes the cached key.
+## 5. Post-Quantum (PQ) Ratchet Step — PCS Recovery
 
-## 7. State Deletion Schedule (Security Critical)
-To maintain the **Forward Secrecy** claims, the following deletion schedule is mandatory:
+Triggered when `pq_step_counter >= 50` messages or session age exceeds 24 hours.
 
-- **Message Keys ($MK$):** Deleted immediately after one-time use (encryption or decryption).
-- **Chain Keys ($CK$):** Deleted as soon as the next chain key is derived.
-- **Root Key ($RK$):** Deleted as soon as a DH or PQ ratchet updates it.
-- **PQ Secret Keys ($PQ\_sk$):** One secret is stored per outstanding `kem_id` and consumed
-  before decapsulation completes; it is then dropped and zeroized.
-- **Skipped Keys:** Deleted after use OR after a 7-day TTL (Time-To-Live).
-- **Session State:** If a session is closed or a node is "logged out," the entire `RatchetState` must be zeroized using the `zeroize` crate to prevent cold-boot attacks.
+1. **Initiation (Alice):**
+   - Samples fresh ML-KEM-768 keypair `(EPH_PQ_pk, EPH_PQ_sk)`.
+   - Derives `kem_id = BLAKE3("StarMesh-KEM-v1" || session_id || seq || EPH_PQ_pk)`.
+   - Signs `m_init` payload with ML-DSA-65 ($\sigma_{\mathrm{init}}$).
+   - Inserts secret key into `outstanding_kems` and transmits `RecoveryUpdateHeader`.
 
-## 8. Implementation-to-theorem correspondence
+2. **Encapsulation (Bob):**
+   - Verifies `σ_init` under Alice's `IK_DSA_pk` and checks `predecessor ∈ valid_predecessors`.
+   - Computes `(ct, SS_PQ) ← ML-KEM-768.Encaps(EPH_PQ_pk)`.
+   - Signs `m_resp` payload with ML-DSA-65 ($\sigma_{\mathrm{resp}}$), binding `EPH_PQ_pk` and `ct`.
+   - Queues update in `completed_kems` and transmits `RecoveryUpdateResponse`.
+   - Calls `drain_completed()`.
 
-| Theorem transition | Rust transition |
+3. **Decapsulation (Alice):**
+   - Verifies `σ_resp` under Bob's `trusted_responder_identity`.
+   - Consumes and zeroizes `EPH_PQ_sk` via `Option::take()`.
+   - Computes `SS_PQ ← ML-KEM-768.Decaps(EPH_PQ_sk, ct)`.
+   - Queues update in `completed_kems` and calls `drain_completed()`.
+
+4. **Ordered Application (Single Extract, Two Expands):**
+   Updates are applied in strictly increasing sequence (`next_kem_to_apply`):
+
+   $$PRK = \text{HKDF-Extract}(salt = SS_{PQ}, ikm = RK_{old} \mathbin{\|} EP_{old})$$
+   $$EP_{new} = \text{HKDF-Expand}(PRK, \text{"StarMesh-v1-EntropyPool"} \mathbin{\|} kem\_id \mathbin{\|} ct, L = 32)$$
+   $$out = \text{HKDF-Expand}(PRK, \text{"StarMesh-v1-PQ-RK"} \mathbin{\|} kem\_id \mathbin{\|} ct, L = 96)$$
+
+   $$RK_{new} = out[0..32]$$
+
+   **Directional Assignment:**
+   | Role | `send_chain_key` | `recv_chain_key` |
+   |---|---|---|
+   | Initiator (Alice) | `out[32..64]` | `out[64..96]` |
+   | Responder (Bob) | `out[64..96]` | `out[32..64]` |
+
+   - Advances transcript: `transcript_hash' = BLAKE3(transcript_hash ‖ kem_id ‖ ct)`.
+   - Adds `transcript_hash'` to `valid_predecessors`.
+   - Moves `kem_id` to `retired_kems`.
+
+---
+
+## 6. Message Headers and Wire Formats
+
+### 6.1 Conversational Message Header
+- `dh_pk`: Current local ephemeral X25519 public key.
+- `n`: Sequence number in current symmetric chain.
+- `pn`: Previous chain length.
+
+### 6.2 Handshake Message $M_0$ Wire Structure
+```
+M_0 = ( IK_DSA_pk_A, IK_DH_pk_A, EK_pk_A, ct_1, ct_2, prekey_id, tag_A, σ_{M_0} )
+```
+where $\sigma_{M_0}$ is Alice's ML-DSA-65 signature over `m_init` (§4.6 in `spec.md`).
+
+### 6.3 Update Proposal Header (`RecoveryUpdateHeader`)
+```
+Header = ( session_id, kem_id, sequence, epoch, predecessor, EPH_PQ_pk, identity_pk, σ_init )
+```
+
+### 6.4 Update Response (`RecoveryUpdateResponse`)
+```
+Response = ( kem_id, EPH_PQ_pk, ct, responder_identity_pk, σ_resp )
+```
+
+---
+
+## 7. Out-of-Order Message Handling & Skipped Keys
+
+If an incoming message arrives with sequence number $N > n_r$:
+1. Receiver ratchets `recv_chain_key` forward to $N$.
+2. All skipped message keys $MK$ are stored in `skipped_keys` indexed by `(dh_pk_remote, seq_num)`.
+3. `skipped_keys` is capped at 1000 entries; oldest keys are zeroized if capacity is reached.
+4. When a delayed message arrives, receiver retrieves $MK$, decrypts, and **immediately zeroizes** the cached key.
+5. All cached skipped keys are purged after a 7-day TTL.
+
+> **Security Caveat (Corollary 5.5, Caveat 2):** Any message key cached in `skipped_keys`
+> prior to state compromise at $t_{\mathrm{comp}}$ remains compromised even after a successful
+> PQ healing round-trip. This is machine-checked in ProVerif (`attacker(w_skipped_pre) is true`).
+
+---
+
+## 8. State Deletion Schedule (Security Critical)
+
+| Key Material | Erasure Timing |
 |---|---|
-| authenticated send | `RatchetState::pq_ratchet_init` |
-| authenticated delivery/encapsulation | `RatchetState::pq_ratchet_encapsulate` |
-| exactly-once decapsulation | `RatchetState::pq_ratchet_decapsulate` |
-| deterministic concurrent application | `RatchetState::drain_completed` |
-| KEM secret erasure | `OutstandingKem.secret_key.take()` and `Drop` |
-| root/chain deletion | `mix_pq_secret` replaces and zeroizes old keys |
-| replay exclusion | `retired_kems` |
+| Message Keys ($MK$) | Immediately after one-time encryption or decryption |
+| Chain Keys ($CK$) | Overwritten and zeroized as soon as next chain key is derived |
+| Root Key ($RK$) | Overwritten and zeroized as soon as DH or PQ ratchet derives new root |
+| Entropy Pool ($EP$) | Overwritten and zeroized as soon as PQ ratchet derives new pool |
+| Ephemeral KEM Secrets ($EPH\_PQ\_sk$) | Consumed via `Option::take()` before decapsulation; zeroized immediately |
+| One-Time Pre-Key Secrets ($PQ\_OTPK\_sk$) | Zeroized immediately after handshake decapsulation |
+| Skipped Message Keys | Deleted upon retrieval OR after 7-day TTL |
+| Session State | Entire `RatchetState` zeroized via `Drop` + `zeroize` upon session close |
 
-The executable correspondence is tested by
-`test_concurrent_out_of_order_updates_and_bidirectional_chains` and
-`test_recovery_header_authentication_is_verified`. It is not a mechanically verified
-refinement proof.
+---
+
+## 9. Implementation-to-Theorem Correspondence
+
+| Protocol Operation | Paper Reference | Rust PoC Implementation |
+|---|---|---|
+| Handshake Authentication | Claim 5.1 / §3.4 | Verified $\sigma_{M_0}$ via `m0_signature_bytes` |
+| Authenticated PQ Update Send | Theorem 4.17 / §3.5.4 | `RatchetState::pq_ratchet_init` ($\sigma_{\mathrm{init}}$) |
+| Authenticated PQ Encapsulation | Theorem 4.17 / §3.5.4 | `RatchetState::pq_ratchet_encapsulate` ($\sigma_{\mathrm{resp}}$) |
+| Single-Use Decapsulation & Erasure | Theorem 4.17 / §3.5.4 | `OutstandingKem.secret_key.take()` in `pq_ratchet_decapsulate` |
+| Deterministic In-Order Application | §3.5.4 / `kem-buffer.md` | `RatchetState::drain_completed` (sorted by sequence) |
+| Root & Chain Key Derivation | §3.5.3 (Single extract, two expands) | `RatchetState::mix_pq_secret` ($salt=SS_{PQ}$, $L=96$) |
+| Replay & Stale Update Exclusion | Freshness Cond. 5 / §4.5 | `retired_kems` set + predecessor validation |
+
+Tested by `cargo test` in `poc/rust/src/main.rs`.

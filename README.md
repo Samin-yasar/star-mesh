@@ -29,14 +29,20 @@ The repository is organized to support three primary uses:
 ```text
 Star-Mesh/
 ├── README.md                  # Project overview and entry point
+├── spec.md                    # Byte-level protocol specification (single source of truth)
 ├── LICENSE                    # Apache License 2.0
 ├── Makefile                   # Primary build and execution entry points
 ├── docs/                      # Research notes and protocol documentation
 │   ├── README.md              # Documentation index and reading guide
 │   ├── construction.md        # Hybrid cryptographic construction
 │   ├── ratchet.md             # Ratchet state machine specification
+│   ├── kem-buffer.md          # Concurrent KEM buffer state machine
 │   ├── roadmap.md             # Engineering roadmap and milestones
-│   └── research-notes.md      # Additional design observations and open questions
+│   └── ...                    # additional design notes and research records
+├── formal/                    # Formal symbolic models (ProVerif)
+│   ├── README.md              # Formal verification guide and results
+│   ├── pq_x3dh.pv             # Handshake model
+│   └── ratchet.pv             # Ratchet model (passive healing & skipped-key caveat)
 ├── paper/                     # LaTeX source for the paper
 │   ├── Makefile               # Paper build pipeline
 │   ├── paper.tex              # Main manuscript source
@@ -60,14 +66,26 @@ Star-Mesh/
 
 The repository is intended to be read and exercised in a small number of standard ways.
 
-### Python demonstration
+### Python reference implementation
 
 ```bash
 python3 -m venv .venv
+.venv/bin/pip install kyber-py dilithium-py blake3 cryptography
 .venv/bin/python3 poc/python/poc.py
 ```
 
-This creates a fresh local virtual environment on the host machine so the executable does not depend on a machine-specific Xcode Python path. The reference walk-through verifies the essential protocol behavior: key generation, hybrid handshake convergence, symmetric ratchet agreement, and PQ ratchet recovery.
+This exercises the full protocol using real post-quantum primitives:
+- **ML-KEM-768** via [`kyber-py`](https://github.com/GiacomoPope/kyber-py) (pure-Python FIPS 203)
+- **ML-DSA-65** via [`dilithium-py`](https://github.com/GiacomoPope/dilithium-py) (pure-Python FIPS 204)
+- **X25519 and AES-256-GCM** via [`cryptography`](https://cryptography.io)
+- **HKDF-SHA3-256** via `hmac` + `hashlib.sha3_256` (one-extract / two-expand shape matching the paper)
+- **BLAKE3** via [`blake3`](https://github.com/oconnor663/blake3) in `derive_key` mode
+
+Key sizes match the paper's tables exactly (ML-KEM-768: 1184 B pk, 1088 B ct, 32 B ss; ML-DSA-65: 1952 B pk, 3309 B sig).
+
+> **Scope note.** These libraries are pure-Python, unaudited, and not constant-time.
+> They are correct reference implementations for studying message flow and catching
+> spec drift between the Python and Rust code. They must not be used in production.
 
 ### Rust reference implementation
 
@@ -75,7 +93,7 @@ This creates a fresh local virtual environment on the host machine so the execut
 cargo run --manifest-path poc/rust/Cargo.toml
 ```
 
-This path exercises the same protocol logic using concrete cryptographic crates. It is the closest implementation artifact to a production-grade prototype.
+The Rust prototype uses production RustCrypto crates (`ml-kem` v0.3, `ml-dsa` v0.1.1, `x25519-dalek`, `blake3`, `hkdf`/`sha3`, `aes-gcm`, `zeroize`). It is the closest artifact to a production-grade implementation and is the source of all timing benchmarks cited in the paper.
 
 ### Paper build
 
@@ -113,11 +131,13 @@ make clean
 For a focused reading sequence, the repository is designed to be traversed in this order:
 
 1. [README.md](README.md) — project framing and entry point.
-2. [docs/README.md](docs/README.md) — documentation map and narrative structure.
-3. [docs/construction.md](docs/construction.md) — cryptographic construction.
-4. [docs/ratchet.md](docs/ratchet.md) — ratchet state machine.
-5. [docs/roadmap.md](docs/roadmap.md) — engineering phases and validation targets.
-6. [paper/paper.tex](paper/paper.tex) — formal manuscript.
+2. [spec.md](spec.md) — byte-level protocol specification and source of truth.
+3. [docs/README.md](docs/README.md) — documentation map and narrative structure.
+4. [docs/construction.md](docs/construction.md) — cryptographic construction.
+5. [docs/ratchet.md](docs/ratchet.md) — ratchet state machine.
+6. [docs/kem-buffer.md](docs/kem-buffer.md) — concurrent KEM buffer state machine.
+7. [docs/roadmap.md](docs/roadmap.md) — engineering phases and validation targets.
+8. [paper/paper.tex](paper/paper.tex) — formal manuscript.
 
 This ordering reflects the research flow: protocol specification first, then operational engineering, then the formal write-up.
 

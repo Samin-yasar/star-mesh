@@ -1,6 +1,11 @@
 # D-MLS Design Note
 
-This note scopes a decentralized group-messaging extension for Star-Mesh. It is a research
+> **Synced with spec.md / paper rev:** v0.1 (October 2026)
+>
+> **Source of truth**: Group extension specifications build upon the primitives and identity
+> structures defined in [`spec.md`](../spec.md) (ML-DSA-65, HKDF-SHA3-256) and the group messaging
+> research discussion in `paper/paper.tex` (§8).
+
 construction sketch, not an implementation of RFC 9420. The key design constraint is that an MLS
 commit is not an ordinary CRDT value: it changes the epoch secret and authenticates a specific
 prior tree. Therefore, arbitrary concurrent commits cannot be merged by taking the union of their

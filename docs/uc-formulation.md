@@ -1,6 +1,10 @@
 # UC Formulation for Star-Mesh
 
-This document sketches a Canetti-style ideal functionality for Star-Mesh. It is a specification
+> **Synced with spec.md / paper rev:** v0.1 (October 2026)
+>
+> **Source of truth**: Core protocol operations and cryptographic definitions follow
+> [`spec.md`](../spec.md) and the formal security model in `paper/paper.tex` (§4).
+
 and proof plan, not a UC realization theorem. The current ProVerif models are symbolic and do not
 establish this formulation.
 

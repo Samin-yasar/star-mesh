@@ -1,6 +1,10 @@
 # Star-Mesh (StarConnect) Development Roadmap
 
-This document outlines the phased engineering roadmap for the Star-Mesh protocol, transitioning the cryptographic models from paper to a production-ready, cross-platform implementation.
+> **Synced with spec.md / paper rev:** v0.1 (October 2026)
+>
+> **Source of truth**: Byte-level formats, domain labels, wire structures, and KDF inputs
+> are canonically defined in [`spec.md`](../spec.md). Engineering phases implement the
+> constructions analyzed in `paper/paper.tex`.
 
 ---
 
@@ -17,69 +21,63 @@ This plan decomposes the Star-Mesh protocol into six engineering phases, moving 
 
 ## 2. Phase 1: Cryptographic Core & Identity Layer (Months 1–3)
 
-### 2.1 Milestone: Self-Sovereign Identity (SSI) Module
+### 2.1 Milestone: Post-Quantum Identity Module
 - **Crate**: `star_mesh_identity`
-- **Entropy Source**: Use `rand::rngs::OsRng` to generate 128-bit entropy. Map to BIP-39 mnemonic via the `tiny-bip39` crate.
-- **SLIP-0010 Derivation**: Implement hierarchical derivation for Ed25519. *Critical*: Do not use secp256k1 paths. The derivation path must be `m/44'/784'/0'/0'/0'` (Star-Mesh coin type registered at 784' per SLIP-44).
+- **Identity Architecture**:
+  - `IK_DSA`: Long-term ML-DSA-65 signing keypair (FIPS 204), hardware/enclave isolated.
+  - `IK_DH`: Long-term X25519 classical static DH keypair (RFC 7748).
+  - `SPK`: Medium-term X25519 signed pre-key.
+  - `PQ_SPK`: Medium-term ML-KEM-768 static pre-key (FIPS 203).
 - **Key Material Structure**:
   ```rust
   pub struct IdentityBundle {
-      pub master_seed: [u8; 16],              // 128-bit entropy
-      pub ik: ed25519_dalek::Keypair,         // $IK$ - Long-term signing
-      pub spk: x25519_dalek::StaticSecret,    // $SPK$ - Medium-term handshake
-      pub pq_pk: oqs::kem::PublicKey,         // $PQ-PK$ - ML-KEM-768
-      pub pq_sk: oqs::kem::SecretKey,         // $PQ-SK$ - Stored encrypted-at-rest
+      pub ik_dsa_sk: ml_dsa::SigningKey<ml_dsa::MlDsa65>,
+      pub ik_dsa_pk: ml_dsa::VerifyingKey<ml_dsa::MlDsa65>,
+      pub ik_dh_sk: x25519_dalek::StaticSecret,
+      pub ik_dh_pk: x25519_dalek::PublicKey,
+      pub spk: x25519_dalek::StaticSecret,
+      pub pq_spk_sk: ml_kem::DecapsulationKey<ml_kem::MlKem768>,
+      pub pq_spk_pk: ml_kem::EncapsulationKey<ml_kem::MlKem768>,
   }
   ```
-- **Persistence**: The `pq_sk` and `spk` must be encrypted using AES-256-GCM with a key derived from the master seed via Argon2id (memory=64MB, iterations=3, parallelism=4) before hitting the filesystem.
-- **Deliverable**: `IdentityBundle` generation, serialization, and encrypted storage. Unit tests for BIP-39 round-trip and SLIP-0010 vector compliance.
+- **Persistence**: Private key material must be protected via platform secure enclaves or encrypted using AES-256-GCM with keys derived from a master seed via Argon2id.
+- **Deliverable**: `IdentityBundle` generation, serialization, and encrypted storage.
 
 ### 2.2 Milestone: Hybrid PQ-X3DH Handshake
 - **Crate**: `star_mesh_handshake`
-- **Pre-Key Bundle Publishing**: A peer’s bundle is a signed structure containing:
-  - `ik_pub` (Ed25519)
-  - `spk_pub` (X25519)
-  - `spk_sig` (Signature of `spk_pub` by `ik`)
-  - `pq_pk` (ML-KEM-768 public key)
-  - `otpk_pub` (Optional one-time X25519 pre-key, rotated every 24h)
-- **Shared Secret Derivation (SS)**:
-  ```rust
-  pub fn derive_shared_secret(
-      eph_x25519_sk: &x25519_dalek::EphemeralSecret,
-      remote_spk: &x25519_dalek::PublicKey,
-      remote_pq_pk: &oqs::kem::PublicKey,
-      associated_data: &[u8],
-  ) -> Result<[u8; 64], HandshakeError> {
-      // 1. Classical ECDH
-      let ecdh_shared = eph_x25519_sk.diffie_hellman(remote_spk).to_bytes();
-      
-      // 2. Post-Quantum KEM Encapsulation
-      let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::Kyber768)?;
-      let (ct, pq_shared) = kem.encapsulate(remote_pq_pk)?;
-      
-      // 3. Concatenation & HKDF
-      let mut concat = Vec::with_capacity(ecdh_shared.len() + pq_shared.len());
-      concat.extend_from_slice(&ecdh_shared);
-      concat.extend_from_slice(&pq_shared);
-      
-      // HKDF-SHA3-256 -> 512-bit output (split for sending chain / receiving chain)
-      let okm = hkdf_sha3_256(&concat, associated_data, 64)?;
-      Ok(okm)
-  }
+- **Pre-Key Bundle Publishing**: A peer’s bundle is published to DHT key `SHA3-256(IK_DSA_pk)`:
   ```
-- **Associated Data (AD)**: Must bind the handshake to specific identities to prevent identity misbinding attacks:
-  $$ AD = \text{"StarMesh-v1"} \parallel |IK_{pk}^A| \parallel IK_{pk}^A \parallel |IK_{pk}^B| \parallel IK_{pk}^B $$
-- **Deliverable**: Functional Alice→Bob and Bob→Alice handshake with test vectors. Formal proof sketch of SS indistinguishability under $Adv_{Quant}$.
+  Bundle = { IK_DSA_pk, IK_DH_pk, SPK_pk, PQ_SPK_pk, OTPK_pk[], PQ_OTPK_pk[], σ_bundle }
+  ```
+  where `σ_bundle = ML-DSA-65.Sign(IK_DSA_sk, BundlePayload)`.
+- **Hybrid Secret Derivation**:
+  1. Classical component: $SS_{cl} = DH_1 \parallel DH_2 \parallel DH_3 \parallel DH_4$ (4 X25519 outputs).
+  2. Post-quantum component: $(ct_1, SS_{PQ1}) \gets \text{Encaps}(PQ\_SPK)$, $(ct_2, SS_{PQ2}) \gets \text{Encaps}(PQ\_OTPK)$.
+  3. Hybrid concatenation: $SS_{hybrid} = 0\text{xFF} \parallel SS_{cl} \parallel SS_{PQ1} \parallel SS_{PQ2}$.
+  4. HKDF-SHA3-256 derivation with bound identities and ciphertexts:
+     $$OKM = \text{HKDF-SHA3-256}(ikm = SS_{hybrid}, salt = 0^{32}, info = info, L = 64)$$
+     $$RK = OKM[0..32], \quad CK_s = OKM[32..64]$$
+  5. Confirmation tags: $tag_A$ in $M_0$, $tag_B$ in responder reply.
+  6. $M_0$ wire signature: $\sigma_{M_0} = \text{ML-DSA-65.Sign}(IK^{DSA}_{sk,A}, m_{\mathrm{init}})$.
+- **Deliverable**: Functional initiator and responder handshake with test vectors.
 
 ### 2.3 Milestone: Double Ratchet Engine
 - **Crate**: `star_mesh_ratchet`
-- **Root Chain**: Initialized with the first 32 bytes of SS.
-- **Message Chain**: Standard Signal-protocol Double Ratchet with a critical modification:
-  - **DH Ratchet**: Uses X25519 ephemeral keys.
-  - **KEM Ratchet**: Every 50 messages (or 24 hours), trigger a "PQ Ratchet Step" where a new ML-KEM encapsulation is performed and mixed into the root chain via $HKDF(root\_key \parallel pq\_shared)$.
-  - **Hash Chain**: Uses BLAKE3 for speed and length-extension resistance.
-  - **Key Material Exposure Limit**: Each message key is derived as $mk_i = KDF(chain\_key\_i, 0x01)$ and immediately zeroized from memory after encryption/decryption using the `zeroize` crate.
-- **Deliverable**: State machine implementation with serialization/deserialization. Test: Compromise `chain_key` at message $N$; verify message $N-1$ keys are irrecoverable.
+- **Root Chain & Entropy Pool**: Initialized from handshake $OKM[0..32]$.
+- **Symmetric Ratchet**: Per-message keys derived using BLAKE3-KDF:
+  $$MK_i = \text{BLAKE3-KDF}(CK_i, \text{domain} = \text{0x01}, \text{"StarMesh-MK"})$$
+  $$CK_{i+1} = \text{BLAKE3-KDF}(CK_i, \text{domain} = \text{0x02}, \text{"StarMesh-CK"})$$
+  Immediate zeroization of $MK_i$ after one-time use; $CK_i$ replaced and zeroized.
+- **Classical DH Ratchet**: Triggered by incoming ephemeral X25519 public key, updating $RK$ and $CK_s$ via HKDF-SHA3-256 (Assumption 4.3 DDH / PRF-ODH).
+- **Post-Quantum Ratchet**: Triggered every 50 messages or 24h:
+  - Initiator signs `RecoveryUpdateHeader` ($\sigma_{\mathrm{init}}$) under `IK_DSA_sk`.
+  - Responder signs `RecoveryUpdateResponse` ($\sigma_{\mathrm{resp}}$) under `IK_DSA_sk`.
+  - Derivation via single extract, two expands:
+    $$PRK = \text{HKDF-Extract}(salt = SS_{PQ}, ikm = RK \parallel EP)$$
+    $$EP' = \text{HKDF-Expand}(PRK, \text{"StarMesh-v1-EntropyPool"} \parallel kem\_id \parallel ct, L = 32)$$
+    $$out = \text{HKDF-Expand}(PRK, \text{"StarMesh-v1-PQ-RK"} \parallel kem\_id \parallel ct, L = 96)$$
+  - Directional chain key assignment: initiator receives send=`out[32..64]`, recv=`out[64..96]`; responder receives send=`out[64..96]`, recv=`out[32..64]`.
+- **Deliverable**: Ratchet state machine with out-of-order KEM buffer.
 
 ---
 
@@ -87,9 +85,9 @@ This plan decomposes the Star-Mesh protocol into six engineering phases, moving 
 
 ### 3.1 Milestone: libp2p Stack Integration
 - **Crate**: `star_mesh_network`
-- **Transport Stack**: QUIC (over UDP) as the primary transport. Fallback to TCP/IP via DNS if QUIC is blocked. `libp2p_quic::Config::default()` with custom TLS certificate logic replaced by Star-Mesh identity keys.
-- **Noise Framework Replacement**: Do not use libp2p's default Noise handshake. Instead, use the `star_mesh_handshake` crate as a custom `SecurityProtocol`. This requires implementing `libp2p::core::upgrade::InboundUpgrade` and `OutboundUpgrade`.
-- **Peer ID Generation**: `PeerId` must be derived from `IK_pub` (Ed25519) to create a cryptographically bound identity: $PeerId = multihash(sha2\_256(IK\_pub))$.
+- **Transport Stack**: QUIC (over UDP) as primary transport. Fallback to TCP/IP via DNS.
+- **Security Upgrade**: Use `star_mesh_handshake` as a custom `SecurityProtocol` implementing `libp2p::core::upgrade::InboundUpgrade` and `OutboundUpgrade`.
+- **Peer ID Generation**: $PeerId = multihash(sha3\_256(IK\_DSA\_pk))$ cryptographically bound to the post-quantum identity.
 
 ### 3.2 Milestone: Kademlia DHT for Discovery & Routing
 - **DHT Configuration**:
@@ -97,7 +95,7 @@ This plan decomposes the Star-Mesh protocol into six engineering phases, moving 
   - $\alpha = 3$ (parallelism parameter).
   - **Replication factor**: Store each record on the $k$ closest nodes to the key.
 - **Record Types**:
-  - `PreKeyBundleRecord`: TTL = 7 days. Key = $SHA3\_256(IK\_pub)$.
+  - `PreKeyBundleRecord`: TTL = 7 days. Key = $SHA3\_256(IK\_DSA\_pk)$.
   - `MultiaddrRecord`: TTL = 1 hour. Contains QUIC/TCP endpoints.
   - `MailboxPointerRecord`: TTL = 24 hours. Points to encrypted message blobs.
 - **Bootstrapping**: Hardcoded list of 5–10 "Genesis Nodes" (run by the project team). These are purely for initial peer discovery and cannot read message content.
@@ -248,8 +246,9 @@ This plan decomposes the Star-Mesh protocol into six engineering phases, moving 
 
 | Component | Primary Crate / Tool | Risk | Mitigation |
 | :--- | :--- | :--- | :--- |
-| **ML-KEM** | `oqs` (liboqs bindings) | NIST standard evolving; side-channels. | Audit C bindings; use `pqcrypto` or native Rust `ml-kem` as fallback. |
-| **Ed25519** | `ed25519-dalek` | Signature malleability issues. | Pin to v2.0+; verify signatures with zip215 rules. |
+| **ML-KEM-768** | `ml-kem` (FIPS 203) / `pqcrypto` | Constant-time side-channels. | Benchmark constant-time guarantees; continuous testing. |
+| **ML-DSA-65** | `ml-dsa` (FIPS 204) | Enclave signing latency. | Hardware-enclave isolation; batch operations. |
+| **Classical DH** | `x25519-dalek` (RFC 7748) | Implementation bugs / zero-point validation. | Use dalek v2.0+ with strict point validation. |
 | **libp2p** | `libp2p` | Brittle custom security protocol. | Maintain fork for custom SecurityProtocol; upstream patches. |
 | **SQLCipher** | `sqlcipher` | Mobile performance degradation. | Archive messages (move to encrypted blob after 90 days). |
 | **WASM** | `wasm-bindgen` | JS/Rust boundary overhead; leaks. | Use ray-on for parallelization; strict drop tests. |
